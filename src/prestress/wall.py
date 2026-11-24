@@ -31,18 +31,23 @@ def _wedge_volumes(x: np.ndarray, wedges: np.ndarray) -> np.ndarray:
     return vol
 
 
-def _wedge_min_jacobian(x: np.ndarray, wedges: np.ndarray) -> np.ndarray:
-    """Smallest ``det(dx/dxi)`` over the element's integration points.
+def _wedge_min_jacobian(x: np.ndarray, wedges: np.ndarray,
+                        reduce: str | None = "min") -> np.ndarray:
+    """``det(dx/dxi)`` at the element's integration points.
 
     This, not the total volume, is what FEBio checks when it initialises the
     mesh: a wedge can have positive volume and still be inverted at one Gauss
     point, and FEBio then refuses the model outright.
+
+    ``reduce="min"`` (the default) returns the smallest value per element;
+    ``reduce=None`` returns the whole ``(n_elem, n_gp)`` array, which is what
+    the quality ratio in :func:`extrude_wall` needs.
     """
     from .elements import element_for
 
     dn = element_for("penta6").grads()            # (gp, 6, 3)
-    jac = np.einsum("eni,gnj->egij", x[wedges], dn)
-    return np.linalg.det(jac).min(axis=1)
+    jac = np.linalg.det(np.einsum("eni,gnj->egij", x[wedges], dn))
+    return jac.min(axis=1) if reduce == "min" else jac
 
 
 @dataclass
@@ -201,6 +206,7 @@ def _build(pts, nrm, faces, thickness, n_layers):
 def extrude_wall(surf, thickness: np.ndarray, n_layers: int = 2,
                  smooth_normal_iters: int = 5, max_relax: int = 60,
                  grading: float = 0.5, drop_bad: bool = True,
+                 min_quality: float = 0.05,
                  node_fields: dict | None = None) -> WallMesh:
     """Extrude the lumen surface outwards into ``n_layers`` of wedge elements.
 
@@ -244,13 +250,28 @@ def extrude_wall(surf, thickness: np.ndarray, n_layers: int = 2,
     # FEBio diverged on the resulting mesh -- so the folding elements are
     # dropped instead and the rest of the wall keeps its full thickness.
     nodes, wedges = _build(pts, nrm, faces, thickness, n_layers)
-    bad = _wedge_min_jacobian(nodes, wedges) <= 0.0
+
+    # An element that merely *folds* is caught by min(det) <= 0.  One that is
+    # badly distorted but still right way round is not -- and it inverts as
+    # soon as the wall is loaded.  On this aorta a single wedge with
+    # min(det)/mean(det) = 0.033 survived the fold test and then produced the
+    # two negative jacobians that stopped every AIM variant at 14 % of the in
+    # vivo pressure.  The quality ratio is scale free, so one threshold works
+    # across vessel sizes; the distribution is strongly bimodal (median 0.97,
+    # 1st percentile 0.83) and a cut at 0.05 removes one element in 25,819.
+    jac = _wedge_min_jacobian(nodes, wedges, reduce=None)
+    quality = jac.min(axis=1) / jac.mean(axis=1)
+    bad = (jac.min(axis=1) <= 0.0) | (quality <= min_quality)
     if bad.any():
         if not drop_bad:
             raise RuntimeError(f"{bad.sum()} of {len(wedges)} wedges invert")
         import warnings
-        warnings.warn(f"dropped {bad.sum()} of {len(wedges)} wedges that fold "
-                      "at every thickness (concave branch junctions)")
+        n_fold = int((jac.min(axis=1) <= 0.0).sum())
+        warnings.warn(
+            f"dropped {bad.sum()} of {len(wedges)} wedges: {n_fold} fold at "
+            f"every thickness (concave branch junctions), "
+            f"{int(bad.sum()) - n_fold} are below the quality floor "
+            f"{min_quality:g}")
         lost_layer0 = np.unique(np.flatnonzero(bad[:len(faces)]))
         wedges = wedges[~bad]
         faces = np.delete(faces, lost_layer0, axis=0)
