@@ -23,10 +23,15 @@ from pathlib import Path
 
 import numpy as np
 
+from dataclasses import dataclass, field
+
 from .mesh import CylinderMesh
 from .params import MaterialParams
 
 __all__ = [
+    "FEModel",
+    "cylinder_model",
+    "wall_model",
     "febio_executable",
     "plugin_path",
     "write_elastin_feb",
@@ -35,6 +40,55 @@ __all__ = [
     "read_node_log",
     "read_node_log_all",
 ]
+
+@dataclass
+class FEModel:
+    """What the writer needs to know about a mesh, whatever its shape.
+
+    Keeps the input writer independent of the cylinder: the aorta wall is
+    wedges with triangular luminal facets and a single clamped ring node set,
+    the cylinder is hexahedra with quadrilateral facets and three symmetry
+    sets, and both go through the same code.
+    """
+
+    nodes: np.ndarray                      # (n_node, 3)
+    elements: np.ndarray                   # (n_elem, nodes-per-element)
+    facets: np.ndarray                     # pressure surface, 0-based
+    elem_type: str = "hex8"                # FEBio element name
+    facet_type: str = "quad4"
+    nodesets: dict = field(default_factory=dict)      # name -> node ids
+    bcs: tuple = ()                        # (name, nodeset, (x, y, z)) triples
+
+    @property
+    def n_node(self) -> int:
+        return len(self.nodes)
+
+    @property
+    def n_elem(self) -> int:
+        return len(self.elements)
+
+
+def cylinder_model(mesh: CylinderMesh) -> FEModel:
+    """The idealised vessel: hexahedra, axis-aligned symmetry constraints."""
+    return FEModel(
+        nodes=mesh.nodes, elements=mesh.hexes, facets=mesh.inner_facets,
+        elem_type="hex8", facet_type="quad4",
+        nodesets={"fix_x": mesh.fix_x, "fix_y": mesh.fix_y, "fix_z": mesh.fix_z},
+        bcs=(("bcx", "fix_x", (1, 0, 0)),
+             ("bcy", "fix_y", (0, 1, 0)),
+             ("bcz", "fix_z", (0, 0, 1))),
+    )
+
+
+def wall_model(mesh) -> FEModel:
+    """A vessel wall extruded from a lumen surface: wedges, clamped rings."""
+    return FEModel(
+        nodes=mesh.nodes, elements=mesh.wedges, facets=mesh.lumen_facets,
+        elem_type="penta6", facet_type="tri3",
+        nodesets={"rings": mesh.ring_nodes},
+        bcs=(("clamp", "rings", (1, 1, 1)),),
+    )
+
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FEBIO = _ROOT / "external/FEBio/cbuild/bin/febio4"
@@ -98,22 +152,39 @@ def _fmt_nodes(nodes):
     )
 
 
-def _fmt_elems(hexes):
+def _fmt_elems(elems):
     return "\n".join(
         f'      <elem id="{i + 1}">' + ",".join(str(n + 1) for n in e) + "</elem>"
-        for i, e in enumerate(hexes)
+        for i, e in enumerate(elems)
     )
 
 
-def _fmt_facets(facets):
+def _fmt_facets(facets, kind):
     return "\n".join(
-        f'      <quad4 id="{i + 1}">' + ",".join(str(n + 1) for n in f) + "</quad4>"
+        f'      <{kind} id="{i + 1}">' + ",".join(str(n + 1) for n in f)
+        + f"</{kind}>"
         for i, f in enumerate(facets)
     )
 
 
 def _fmt_nodeset(ids):
     return "      " + ",".join(str(i) for i in np.unique(ids) + 1)
+
+
+def _fmt_nodesets(sets: dict) -> str:
+    return "\n".join(
+        f'    <NodeSet name="{name}">\n{_fmt_nodeset(ids)}\n    </NodeSet>'
+        for name, ids in sets.items()
+    )
+
+
+def _fmt_bcs(bcs) -> str:
+    return "\n".join(
+        f'    <bc name="{name}" type="zero displacement" node_set="{nset}">\n'
+        f"      <x_dof>{x}</x_dof><y_dof>{y}</y_dof><z_dof>{z}</z_dof>\n"
+        "    </bc>"
+        for name, nset, (x, y, z) in bcs
+    )
 
 
 def _fmt_domain_opts(laugon: bool, augtol: float, maxaug: int) -> str:
@@ -162,7 +233,7 @@ def _fmt_mp_map(name: str, values: np.ndarray) -> str:
 # ---------------------------------------------------------------------------
 def _assemble(
     path: Path,
-    mesh: CylinderMesh,
+    model: FEModel,
     coords: np.ndarray,
     material: str,
     pressure: float,
@@ -194,21 +265,13 @@ def _assemble(
     <Nodes name="vessel">
 {_fmt_nodes(coords)}
     </Nodes>
-    <Elements type="hex8" name="wall">
-{_fmt_elems(mesh.hexes)}
+    <Elements type="{model.elem_type}" name="wall">
+{_fmt_elems(model.elements)}
     </Elements>
     <Surface name="lumen">
-{_fmt_facets(mesh.inner_facets)}
+{_fmt_facets(model.facets, model.facet_type)}
     </Surface>
-    <NodeSet name="fix_x">
-{_fmt_nodeset(mesh.fix_x)}
-    </NodeSet>
-    <NodeSet name="fix_y">
-{_fmt_nodeset(mesh.fix_y)}
-    </NodeSet>
-    <NodeSet name="fix_z">
-{_fmt_nodeset(mesh.fix_z)}
-    </NodeSet>
+{_fmt_nodesets(model.nodesets)}
 {extra_nodesets}\
   </Mesh>
   <MeshDomains>
@@ -218,15 +281,7 @@ def _assemble(
   </MeshDomains>
 {meshdata_block}\
   <Boundary>
-    <bc name="bcx" type="zero displacement" node_set="fix_x">
-      <x_dof>1</x_dof><y_dof>0</y_dof><z_dof>0</z_dof>
-    </bc>
-    <bc name="bcy" type="zero displacement" node_set="fix_y">
-      <x_dof>0</x_dof><y_dof>1</y_dof><z_dof>0</z_dof>
-    </bc>
-    <bc name="bcz" type="zero displacement" node_set="fix_z">
-      <x_dof>0</x_dof><y_dof>0</y_dof><z_dof>1</z_dof>
-    </bc>
+{_fmt_bcs(model.bcs)}
   </Boundary>
   <Loads>
     <surface_load name="luminal_pressure" type="pressure" surface="lumen">
@@ -256,6 +311,17 @@ def _assemble(
     return path
 
 
+def _as_model(mesh) -> FEModel:
+    """Accept an FEModel, a CylinderMesh or a WallMesh."""
+    if isinstance(mesh, FEModel):
+        return mesh
+    if hasattr(mesh, "hexes"):
+        return cylinder_model(mesh)
+    if hasattr(mesh, "wedges"):
+        return wall_model(mesh)
+    raise TypeError(f"cannot build an FEModel from {type(mesh).__name__}")
+
+
 def write_elastin_feb(
     path, mesh, p: MaterialParams, pressure: float, coords=None,
     nodal_forces: np.ndarray | None = None,
@@ -271,6 +337,7 @@ def write_elastin_feb(
     only ever sees an isotropic material, a pressure and nodal loads.
     """
     path = Path(path)
+    model = _as_model(mesh)
     control = (
         "    <analysis>STATIC</analysis>\n"
         f"    <time_steps>{n_steps}</time_steps>\n"
@@ -292,7 +359,7 @@ def write_elastin_feb(
     if nodal_forces is not None:
         nodesets = (
             '    <NodeSet name="all">\n'
-            + "      " + ",".join(str(i + 1) for i in range(mesh.n_node))
+            + "      " + ",".join(str(i + 1) for i in range(model.n_node))
             + "\n    </NodeSet>\n"
         )
         loads = (
@@ -303,7 +370,7 @@ def write_elastin_feb(
         )
     meshdata = _fmt_node_map("fiber_force", nodal_forces) if nodal_forces is not None else ""
     return _assemble(
-        path, mesh, mesh.nodes if coords is None else coords, material, pressure,
+        path, model, model.nodes if coords is None else coords, material, pressure,
         control, "        <point>0,0</point>\n        <point>1,1</point>",
         meshdata=meshdata, domain_opts=_fmt_domain_opts(laugon, augtol, maxaug),
         extra_nodesets=nodesets, extra_loads=loads,
@@ -336,6 +403,7 @@ def write_cmm_feb(
     ``t_end`` in steps of ``gr_step``.
     """
     path = Path(path)
+    model = _as_model(mesh)
     if laugon and k_d > 0.0:
         raise ValueError(
             "laugon drives J -> 1, which fights the growth constraint J -> J_g; "
@@ -396,7 +464,7 @@ def write_cmm_feb(
     if t_end > t_gr:
         pts.append(f"        <point>{t_end:.12g},1</point>")
     return _assemble(
-        path, mesh, coords, material, pressure, control, "\n".join(pts),
+        path, model, coords, material, pressure, control, "\n".join(pts),
         meshdata="\n".join(blocks),
         domain_opts=_fmt_domain_opts(laugon, augtol, maxaug), plot=plot,
         plot_vars='      <var type="displacement"/>\n'

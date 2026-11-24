@@ -166,7 +166,8 @@ turnover times), and a badly prestressed mixture is measurably harder to
 integrate — nine of ten effective-pressure runs lost stability before the end of
 the horizon, against none of the exact ones.
 
-See `docs/growth.md` for the model, the two numerical traps that cost real time,
+See `docs/growth.md` for the model and the numerical traps, and `docs/aorta.md`
+for the patient-specific wall,
 and the full tables.
 
 ---
