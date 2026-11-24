@@ -150,8 +150,11 @@ def run_aim(
     relative criterion fires at ``max|U| = 2.6e-1 mm``, a quarter of a
     millimetre of error in the prestressed geometry, simply because the
     contraction rate is about 0.93 per iteration.  With ``tol`` set, the
-    relative criterion is demoted to a stall detector and reported as such
-    instead of being called convergence.
+    relative criterion no longer stops the run: it is reported once, where
+    Algorithm 1 would have stopped, and the iteration carries on to ``tol`` or
+    ``max_iter``.  This matters -- on the aorta the residual is still falling
+    steadily when the relative change first drops below ``eps_c``, so stopping
+    there is not detecting a stall, it is mistaking slow progress for success.
 
     ``anderson`` turns on Anderson acceleration with that many stored
     residuals (0 = off, which is Algorithm 1 as written).  Aitken picks a
@@ -179,6 +182,7 @@ def run_aim(
     step = beta0
     converged = False
     stalled = False
+    noted_eps_c = False
     hist_X: list[np.ndarray] = []
     hist_U: list[np.ndarray] = []
 
@@ -238,13 +242,13 @@ def run_aim(
         if k > 2 and chg[-2] < eps_c and chg[-1] < eps_c:
             if tol is None:
                 converged = True       # Algorithm 1 as written
-            else:
-                stalled = True
+                break
+            if not noted_eps_c:
+                noted_eps_c = True
                 if verbose:
-                    print(f"       residual change below eps_c = {eps_c:g} "
-                          f"at max|U| = {r:.3e} mm, still above tol = "
-                          f"{tol:g}: stalled, not converged")
-            break
+                    print(f"       [Algorithm 1 would stop here: residual "
+                          f"change below eps_c = {eps_c:g} at max|U| = "
+                          f"{r:.3e} mm, {r / tol:.0f}x above tol = {tol:g}]")
 
         U_prev = U
         X_prev = X.copy()
