@@ -1,5 +1,12 @@
 # Building a prestressable wall from a Vascular Model Repository aorta
 
+> The model is **0012_H_AO_H**, a healthy thoracic aorta with the three arch
+> branches (brachiocephalic, left carotid, left subclavian), taken from the
+> Vascular Model Repository. The wall is extruded from
+> `Simulations/0095_0001/mesh-complete/walls_combined.vtp`, which is the
+> surface SimVascular meshed with, already smooth and with the five cap rings
+> as its only open boundaries.
+
 The manuscript's second example is a patient-specific human aorta. That
 geometry is not public, so the test case here is built from a VMR aortofemoral
 model (`~/repos/Aorta/mesh_example`): inlet, AAO1-3, celiac, SMA, both renals,
@@ -135,33 +142,73 @@ on the path, so every cylinder number is unchanged (still `8.571366e-12 mm` in
 configurations that a 20 % load increment cannot resolve. The AIM solves now
 run with FEBio's auto time stepper, which changes the path and not the answer.
 
-## Eq. 9 does not merely contribute nothing — it is actively destructive
+## Correction: Eq. 9 was not what failed
 
-With both fixes in place the `surface` variant still cannot be loaded at all.
-FEBio drives the step size down to `1.85e-5` and gives up at **13.9 % of the
-in vivo pressure** with negative jacobians, after four minutes of retries.
+An earlier version of this file claimed that Eq. 9 taken literally is
+"actively destructive" -- that FEBio could not load the surface variant past
+13.9 % of the in vivo pressure. **That conclusion was wrong**, and it is worth
+recording why, because the reasoning looked sound.
 
-That is the sharper form of the result above. Because `sigma_ef . n = 0` in the
-continuum, *everything* the discrete surface integral produces is
-discretisation error: a load with no consistent direction, set by how far the
-flat facet normals of a decimated triangulation stray from the smooth surface
-normal. It is not a small approximation to the right load, it is a sampling of
-noise — `4.0e3 mN` of resultant that the wall has no way to carry. Its
-`|f|max` of `4.3e2 mN` sits on free nodes, not on the clamped rings.
+The surface variant did fail at 13.9 %. So did the Laplace variant, at
+14.08 %, and the exact nodal variant, at 14.04 %. Three loads with nothing in
+common -- one a pure discretisation artefact, one a smooth thin-wall relief,
+one exactly self-equilibrated -- failing within 0.2 % of each other is not a
+statement about any of them. Elastin alone, with no fibre contribution at all,
+then failed in the same place.
 
-The exact `nodal` forces are larger still (`9.1e2 mN` peak) but their resultant
-is `4.6e-11 mN`: they are the discrete divergence of a self-equilibrated stress
-field, so they cancel the way the continuum says they should. Magnitude was
-never the problem; consistency was.
+The real causes were all in the solver and the mesh, and none of them had
+anything to do with the fibres:
 
-### Why the forces are high-frequency, and why that is correct
+| cause | effect |
+|---|---|
+| `augtol = 1e-8` unreachable on a 115k-dof wall | 4,306 augmentations in one solve, each a full Newton solve of an already-converged problem (residual 3.8e-10 against a tolerance of 1.9e-9) |
+| `etol = 1e-12`, `rtol = 1e-10` | FEBio exhausts `max_refs` and the line search wanders into negative jacobians; one load step ran 17 minutes without an error and still failed |
+| `max_ups = 0` (full Newton) | a stiffness reformation per iteration, where the reformation is the cost |
+| `opt_iter = 10` against ~34 needed | the auto stepper halved `dt` on solves that were converging |
+| one wedge at quality 0.033 | two negative jacobians at 14 % load |
 
-On this mesh the stress tensor `sigma_ef` jumps by 22 % between adjacent nodes
-(99th percentile 79 %). That is not noise in the fibre field: the wall normal
-itself turns 15° across a typical edge, because 3.36 mm edges on a 7.2 mm
-radius vessel give only about 13 elements around the circumference. A tangent
-fibre field on a curved surface genuinely rotates that fast. The resulting
-nodal forces oscillate in sign between neighbours and largely cancel, leaving
-the physical Laplace-like resultant — which is why the median nodal force
-(44 mN) is several times the median pressure force (18 mN) while the net
-fibre effect is only about 8 % of the load.
+Together: 639 stiffness reformations to reach 20 % of the load, against 29 to
+reach 100 % of it once fixed. See `docs/corrections.md` for what this costs
+the manuscript's own reporting.
+
+The statement that survives is the *analytical* one, unchanged and
+independent of any of this: `sigma_ef . n = 0` exactly for an in-plane fibre
+architecture, so Eq. 9 contributes nothing in the continuum, and what the
+discrete surface integral produces is discretisation error. On the new
+geometry its resultant is `5.8e2 mN` against a pressure resultant three orders
+larger. That is a statement about the equation, not about whether FEBio can
+solve it.
+
+## What the three variants actually cost
+
+On the 0012_H_AO_H wall (50,251 wedges, 38,386 nodes, median radius 10.1 mm,
+median thickness 1.01 mm, in vivo pressure 17.332 kPa):
+
+| variant | peak nodal force | resultant |
+|---|---|---|
+| `surface` | 5.20e1 mN | 5.84e2 mN |
+| `laplace` | 1.68e1 mN | 3.63e2 mN |
+| `nodal`   | 2.34e2 mN | **1.57e-11 mN** |
+
+The exact `nodal` forces are by far the largest pointwise and their resultant
+is zero to round-off: they are the discrete divergence of a self-equilibrated
+stress field, so they cancel the way the continuum says they should. The
+`surface` forces are an order of magnitude smaller pointwise and yet carry the
+largest resultant of the three -- which is exactly what a load with no
+consistent direction looks like. Magnitude was never the issue; consistency
+was.
+
+### Why the nodal forces are high-frequency, and why that is correct
+
+A tangent fibre field on a curved surface rotates with the surface, so
+`sigma_ef` genuinely varies from node to node and its discrete divergence
+oscillates in sign between neighbours. Most of it cancels, leaving the
+physical Laplace-like resultant, which is why the pointwise forces are several
+times the per-node pressure force while the net fibre effect is only about
+8 % of the load.
+
+Mesh resolution matters here and the new geometry is much better placed: 1.5 mm
+edges on a 10.1 mm radius give about 41 elements around the circumference,
+against 13 on the old surface. The old mesh was coarse enough that the wall
+normal turned 15 degrees across a typical edge and `sigma_ef` jumped 22 %
+between adjacent nodes.
