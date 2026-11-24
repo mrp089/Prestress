@@ -120,8 +120,26 @@ def run_aim(
     eps_c: float = 0.1,
     max_iter: int = 60,
     verbose: bool = True,
+    beta_min: float = 0.05,
+    beta_max: float = 2.0,
+    max_backtrack: int = 4,
 ) -> AIMResult:
-    """Run Algorithm 1 and return the stress-free elastin configuration."""
+    """Run Algorithm 1 and return the stress-free elastin configuration.
+
+    Aitken chooses the step size from the last two residuals, which assumes
+    the map is close to linear.  On a patient-specific wall it is not: the
+    estimate ran up to ``beta = 3.7`` and the extrapolated configuration was
+    one FEBio could not load at all, which ended the run after six otherwise
+    healthy iterations.  Two safeguards, neither of which touches the fixed
+    point -- only the path to it, and the cylinder never reaches either:
+
+    ``beta_max`` caps the extrapolation.  ``max_backtrack`` makes a failed
+    trial configuration recoverable: the step that produced it is halved and
+    the solve retried, the way a line search would.  If the step cannot be
+    rescued the iteration stops and returns the best configuration so far
+    rather than raising, so a run that converged usefully before stalling
+    still yields a result.
+    """
     x_target = mesh.nodes.copy()
     X = x_target.copy()          # X_1 <- x
     beta = beta0
@@ -131,10 +149,32 @@ def run_aim(
     configs: list[np.ndarray] = []
     disps: list[np.ndarray] = []
     U_prev = None
+    X_prev = None
+    step = beta0
     converged = False
+    stalled = False
 
     for k in range(1, max_iter + 1):
-        x_k = solve(X, k)
+        for attempt in range(max_backtrack + 1):
+            try:
+                x_k = solve(X, k)
+                break
+            except RuntimeError:
+                if X_prev is None or attempt == max_backtrack:
+                    if X_prev is None:
+                        raise
+                    stalled = True
+                    break
+                step *= 0.5
+                X = X_prev - step * U_prev
+                if verbose:
+                    print(f"       solve failed, backtracking: "
+                          f"step -> {step:.4f}")
+        if stalled:
+            if verbose:
+                print(f"  AIM {k:3d}:  no solvable step; stopping at "
+                      f"max|U| = {res[-1]:.6e} mm")
+            break
 
         U = x_k - x_target
         r = float(np.abs(U).max())
@@ -149,7 +189,10 @@ def run_aim(
             dU = U - U_prev
             denom = float(np.sum(dU * dU))
             if denom > 0:
-                beta = -beta * float(np.sum(U_prev * dU)) / denom
+                # the Aitken update uses the relaxation actually applied,
+                # which is `step` and not `beta` once either safeguard bites
+                beta = -step * float(np.sum(U_prev * dU)) / denom
+            beta = float(np.clip(beta, beta_min, beta_max))
 
         if verbose:
             print(f"  AIM {k:3d}:  max|U| = {r:.6e} mm   c = {c:.3e}"
@@ -160,12 +203,15 @@ def run_aim(
             break
 
         U_prev = U
-        X = X - beta * U
+        X_prev = X.copy()
+        step = beta
+        X = X - step * U
 
     return AIMResult(
         X=configs[-1], x_target=x_target, iterations=len(res),
         residual=res, change=chg, beta=betas,
-        configs=configs, displacements=disps, converged=converged,
+        configs=configs, displacements=disps,
+        converged=converged and not stalled,
     )
 
 
