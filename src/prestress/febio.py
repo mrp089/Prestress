@@ -143,7 +143,7 @@ _SOLVER = """\
       <min_residual>{min_residual}</min_residual>
       <max_refs>{max_refs}</max_refs>
       <qn_method type="BFGS">
-        <max_ups>0</max_ups>
+        <max_ups>{max_ups}</max_ups>
       </qn_method>
       <reform_each_time_step>1</reform_each_time_step>
       <diverge_reform>1</diverge_reform>
@@ -378,7 +378,7 @@ def write_elastin_feb(
     n_steps: int = 5, etol: float = 1e-16, rtol: float = 1e-16,
     min_residual: float = 1e-16, max_refs: int = 200, plot: bool = False,
     laugon: bool = True, augtol: float = 1e-8, maxaug: int = 30,
-    auto_step: bool = False,
+    auto_step: bool = False, max_ups: int = 0, opt_iter: int = 10,
 ) -> Path:
     """Elastin-only model used inside the AIM (FEBio's built-in Mooney-Rivlin).
 
@@ -386,6 +386,15 @@ def write_elastin_feb(
     represents the embedded fibre stress exactly, see
     ``kinematics.fiber_nodal_forces``.  The solver is still a black box: it
     only ever sees an isotropic material, a pressure and nodal loads.
+
+    ``max_ups`` is the number of BFGS updates between stiffness reformations.
+    Zero is full Newton, which is what the cylinder uses: it is small enough
+    that a reformation is nearly free and the quadratic convergence is worth
+    having.  On a 100k-dof wall a reformation dominates the cost, so BFGS
+    updates pay for themselves.  ``opt_iter`` is the iteration count the auto
+    stepper aims at; set it below what the problem actually needs and the
+    stepper keeps halving ``dt`` for a solve that was converging perfectly
+    well.
 
     ``auto_step`` turns on FEBio's auto time stepper.  A structured cylinder
     reaches the in vivo state in five equal load steps, but a patient-specific
@@ -407,12 +416,12 @@ def write_elastin_feb(
             f"      <dtmin>{1.0 / n_steps * 1e-4:.12g}</dtmin>\n"
             f"      <dtmax>{1.0 / n_steps:.12g}</dtmax>\n"
             "      <max_retries>15</max_retries>\n"
-            "      <opt_iter>10</opt_iter>\n"
+            f"      <opt_iter>{opt_iter}</opt_iter>\n"
             "    </time_stepper>\n"
             if auto_step else ""
         )
         + _SOLVER.format(etol=etol, rtol=rtol, min_residual=min_residual,
-                         max_refs=max_refs)
+                         max_refs=max_refs, max_ups=max_ups)
     )
     material = (
         '    <material id="1" name="wall_material" type="Mooney-Rivlin">\n'
@@ -497,7 +506,7 @@ def write_cmm_feb(
         "    <output_level>OUTPUT_MAJOR_ITRS</output_level>\n"
         + stepper
         + _SOLVER.format(etol=etol, rtol=rtol, min_residual=min_residual,
-                         max_refs=max_refs)
+                         max_refs=max_refs, max_ups=max_ups)
     )
     material = (
         '    <material id="1" name="wall_material" type="prestress_cmm">\n'

@@ -79,6 +79,25 @@ def main() -> None:
     ap.add_argument("--rtol", type=float, default=1e-6)
     ap.add_argument("--etol", type=float, default=1e-8)
     ap.add_argument("--min-residual", type=float, default=1e-10)
+    ap.add_argument("--max-ups", type=int, default=10,
+                    help="BFGS updates between stiffness reformations "
+                         "(0 = full Newton, right for the cylinder, far too "
+                         "expensive here)")
+    ap.add_argument("--opt-iter", type=int, default=30,
+                    help="iteration count the auto time stepper aims at")
+    # The augmented Lagrangian is the right default on the cylinder, where it
+    # removes the volumetric penalty error (9.7e-5 mm at K = 1000 c_e) for
+    # almost nothing.  Here it cannot reach augtol = 1e-8 at all: a single
+    # load step ran to augmentation #27 of 30, and the solve spent 4,306
+    # augmentations -- each a full Newton solve -- to reach t = 0.35.  Every
+    # Newton solve inside them had *already* converged, residual 3.8e-10
+    # against a tolerance of 1.9e-9.  K/c1 = 1667 keeps |J-1| near 1e-4 on its
+    # own, which is far below the discretisation and wall-thickness error on a
+    # patient-specific geometry.
+    ap.add_argument("--laugon", action="store_true",
+                    help="enforce incompressibility by augmented Lagrangian "
+                         "(accurate on the cylinder, unaffordable here)")
+    ap.add_argument("--augtol", type=float, default=1e-4)
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -127,7 +146,9 @@ def main() -> None:
         solve = make_force_solver(model, mat, mat.pressure, workroot / v,
                                   forces=forces[v], rtol=args.rtol,
                                   etol=args.etol, min_residual=args.min_residual,
-                                  n_steps=args.n_steps, auto_step=True)
+                                  n_steps=args.n_steps, auto_step=True,
+                                  max_ups=args.max_ups, opt_iter=args.opt_iter,
+                                  laugon=args.laugon, augtol=args.augtol)
         try:
             aim = run_aim(model, solve, max_iter=args.max_iter)
         except RuntimeError as exc:
