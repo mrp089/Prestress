@@ -124,6 +124,7 @@ def run_aim(
     beta_max: float = 2.0,
     max_backtrack: int = 4,
     tol: float | None = None,
+    anderson: int = 0,
 ) -> AIMResult:
     """Run Algorithm 1 and return the stress-free elastin configuration.
 
@@ -151,6 +152,19 @@ def run_aim(
     contraction rate is about 0.93 per iteration.  With ``tol`` set, the
     relative criterion is demoted to a stall detector and reported as such
     instead of being called convergence.
+
+    ``anderson`` turns on Anderson acceleration with that many stored
+    residuals (0 = off, which is Algorithm 1 as written).  Aitken picks a
+    single scalar step for the whole mesh from the last two residuals.  That
+    is right when the map contracts at about the same rate everywhere, which
+    is the case on the cylinder -- it reaches 8.6e-12 mm in 11 iterations.
+    It is not the case on an aorta: the residual tail sits where the wall is
+    most compliant, far from any clamp and in elements no worse than average,
+    and the map contracts there at about 0.95 per iteration while the median
+    node is already converged to 4 um.  No single scalar serves both, and the
+    Aitken estimate oscillates between 1 and 4 instead of settling.  Anderson
+    builds the update from several past residual *vectors*, so it can take
+    different effective steps in different parts of the mesh.
     """
     x_target = mesh.nodes.copy()
     X = x_target.copy()          # X_1 <- x
@@ -165,6 +179,8 @@ def run_aim(
     step = beta0
     converged = False
     stalled = False
+    hist_X: list[np.ndarray] = []
+    hist_U: list[np.ndarray] = []
 
     for k in range(1, max_iter + 1):
         for attempt in range(max_backtrack + 1):
@@ -197,6 +213,12 @@ def run_aim(
 
         c = abs(r - res[-2]) / res[-2] if k > 1 else np.nan
         chg.append(c)
+        if anderson:
+            hist_X.append(X.copy())
+            hist_U.append(U.copy())
+            if len(hist_X) > anderson + 1:
+                hist_X.pop(0); hist_U.pop(0)
+
         if k > 1:
             dU = U - U_prev
             denom = float(np.sum(dU * dU))
@@ -227,7 +249,19 @@ def run_aim(
         U_prev = U
         X_prev = X.copy()
         step = beta
-        X = X - step * U
+
+        if anderson and len(hist_U) > 1:
+            # least-squares mix of the stored iterates that minimises the
+            # predicted residual, then one relaxed fixed-point step from it
+            dU = np.column_stack([(hist_U[i + 1] - hist_U[i]).ravel()
+                                  for i in range(len(hist_U) - 1)])
+            dX = np.column_stack([(hist_X[i + 1] - hist_X[i]).ravel()
+                                  for i in range(len(hist_X) - 1)])
+            gamma, *_ = np.linalg.lstsq(dU, U.ravel(), rcond=None)
+            X = X - (dX @ gamma).reshape(X.shape) - step * (
+                U - (dU @ gamma).reshape(U.shape))
+        else:
+            X = X - step * U
 
     return AIMResult(
         X=configs[-1], x_target=x_target, iterations=len(res),

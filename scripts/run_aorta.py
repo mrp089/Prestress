@@ -103,6 +103,9 @@ def main() -> None:
     # makes a large cap safe: an overshoot that FEBio cannot load is halved
     # and retried instead of ending the run.
     ap.add_argument("--beta-max", type=float, default=8.0)
+    ap.add_argument("--anderson", type=int, default=5,
+                    help="stored residuals for Anderson acceleration "
+                         "(0 = Algorithm 1's scalar Aitken, which stalls here)")
     ap.add_argument("--tol", type=float, default=1e-3,
                     help="absolute target on max|U| [mm]; Algorithm 1's "
                          "relative criterion becomes a stall detector")
@@ -159,7 +162,8 @@ def main() -> None:
                                   laugon=args.laugon, augtol=args.augtol)
         try:
             aim = run_aim(model, solve, max_iter=args.max_iter,
-                          beta_max=args.beta_max, tol=args.tol)
+                          beta_max=args.beta_max, tol=args.tol,
+                          anderson=args.anderson)
         except RuntimeError as exc:
             # A variant that cannot be loaded at all is a result, not a crash:
             # keep going so the ones that work are still compared.
