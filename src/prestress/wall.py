@@ -80,15 +80,23 @@ class WallMesh:
 
 
 def load_lumen_surface(path: str | Path, scale: float = 10.0,
-                       decimate: float = 0.88, taubin: int = 30):
+                       decimate: float = 0.85, taubin: int = 0):
     """Read a VMR wall surface, scale it, decimate and smooth it.
 
     ``scale`` converts the model units to mm (VMR models are in cm).
     ``decimate`` is the fraction of triangles to remove; boundary vertices are
     kept so the inlet and outlet rings survive intact.  ``taubin`` iterations of
-    volume-preserving smoothing then take the sharp creases out of the branch
-    junctions -- without it the outward extrusion folds there.  Over-smoothing
-    is counter-productive: around 30 iterations is the minimum for this model.
+    volume-preserving smoothing take the sharp creases out of branch junctions,
+    where the outward extrusion otherwise folds.
+
+    A VMR ``mesh-complete/walls_combined.vtp`` is already smooth and far finer
+    than it needs to be (0.5 mm edges on a 10 mm radius), so it needs no
+    smoothing and decimates well: at ``decimate=0.85`` the 167,750 triangles
+    become 25,161 with 1.5 mm edges, and only 0.036 % of the wedges fold, with
+    a 1st-percentile element quality of 0.944.  Decimating less is worse, not
+    better -- the folding rate climbs to 0.36 % on the undecimated surface,
+    because folding is set by the ratio of the wall thickness to the local
+    radius of curvature, and a finer surface resolves sharper creases.
     """
     import pyvista as pv
 

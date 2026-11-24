@@ -11,3 +11,6 @@ output/
 
 # the Pfaller19 heart mesh (33 MB); see docs/heart.md for its provenance
 eva.vtu
+
+# the VMR model folder (user-supplied, 190 MB)
+0012_H_AO_H/

@@ -36,7 +36,8 @@ from prestress.vtk import write_vtk
 from prestress.wall import (extrude_wall, fiber_directions, load_lumen_surface,
                             local_radius, smooth_normals)
 
-SRC = "/Users/pfaller/repos/Aorta/mesh_example/smoothed/walls_combined.vtp"
+SRC = ("0012_H_AO_H/Simulations/0095_0001/mesh-complete/"
+       "walls_combined.vtp")   # VMR 0012_H_AO_H, healthy thoracic aorta
 VARIANTS = ("surface", "laplace", "nodal")
 
 
@@ -68,14 +69,16 @@ def main() -> None:
     ap.add_argument("--max-iter", type=int, default=25)
     ap.add_argument("--n-steps", type=int, default=10,
                       help="load steps per AIM solve (auto stepper sub-divides)")
-    # The cylinder can be driven to 1e-16: it is small and nearly linear.  A
-    # 60k-dof patient-specific mesh cannot, and demanding it only burns through
-    # max_refs and reports "Max nr of reformations reached" on a solve that had
-    # in fact converged.  The AIM floor is then set by these, not by the
-    # precision of the log file.
-    ap.add_argument("--rtol", type=float, default=1e-10)
-    ap.add_argument("--etol", type=float, default=1e-12)
-    ap.add_argument("--min-residual", type=float, default=1e-12)
+    # Solver tolerances.  The cylinder is small and nearly linear and can be
+    # driven to 1e-16; a 100k-dof patient-specific wall cannot, and asking for
+    # it does not merely waste time -- FEBio burns through max_refs
+    # reformations trying, and the line search wanders into configurations
+    # with negative jacobians.  What matters is that each solve is far more
+    # accurate than the AIM residual of interest (1e-6 mm), not that it is as
+    # accurate as arithmetic allows.
+    ap.add_argument("--rtol", type=float, default=1e-6)
+    ap.add_argument("--etol", type=float, default=1e-8)
+    ap.add_argument("--min-residual", type=float, default=1e-10)
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
