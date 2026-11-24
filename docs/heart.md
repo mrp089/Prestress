@@ -90,3 +90,60 @@ The dissertation prestressed this model with BACI's **MULF** algorithm
 fixed-point iteration the AIM belongs to. Running the AIM on the same geometry
 with the same loads and boundary conditions gives a direct comparison between
 the two on a problem where an accepted answer already exists.
+
+## What is built and checked
+
+`src/prestress/heart.py` turns `eva.vtu` into an `FEModel`. Running it:
+
+```
+nodes 282288  tet10 167232                    (846,864 displacement dof)
+  LV         7181 tri6 facets,  14449 nodes
+  RV         7851 tri6 facets,  15795 nodes
+  LA         4299 tri6 facets,   8716 nodes
+  RA         4335 tri6 facets,   8778 nodes
+  vessels    5766 tri6 facets,  11706 nodes
+  epi       19594 tri6 facets,  39481 nodes
+  base        445 tri6 facets,   1327 nodes
+```
+
+Every node carrying a `dsurfN` mask ends up in a facet of that surface, on all
+seven surfaces — so the masks and the extracted boundary agree exactly.
+
+Three checks pin the pieces that fail silently rather than loudly:
+
+* **Node ordering.** VTK's `VTK_QUADRATIC_TETRA` and FEBio's `FETet10` number
+  the ten nodes identically — corners `0-3`, then the edges `(0,1) (1,2) (2,0)
+  (0,3) (1,3) (2,3)` — so the connectivity passes through unchanged. Verified
+  against `FECore/FESolidElementShape.cpp`.
+* **Quadrature.** FEBio's default for tet10 is the 8-point `FETet10G8`
+  (`FEModelBuilder.cpp` sets `m_ntet10 = FE_TET10G8`), *not* the 4-point
+  `FETet10G4` that a reader of the element list would reach for first.
+* **Face orientation and closure.** The volume from the closed tri6 boundary
+  (divergence theorem) and the volume from the tet10 quadrature agree to
+  better than `1e-10` relative: `2.128941e+05 mm^3` both ways. No inverted
+  elements — `min det(dx/dxi) = 6.04e-2` over all 1,337,856 integration
+  points, which is a far better conditioned mesh than the extruded aorta wall.
+
+`tests/test_basics.py::test_tet10_matches_febio` and
+`::test_heart_surfaces_are_outward` keep all three honest.
+
+## Writing the input
+
+`febio.py` now emits several named surfaces, several follower pressures and
+FEBio's `Robin BC` — which is exactly BACI's `ROBIN SPRING DASHPOT`:
+
+| BACI | FEBio |
+|---|---|
+| spring to ground, `1e3` in xyz, `dsurf20` | `Robin BC`, `normal_stiffness = tangential_stiffness = 1e3` |
+| reference-normal spring, `2.0`, `dsurf8` | `Robin BC`, `normal_stiffness = 2.0`, `tangential_stiffness = 0` |
+
+The whole path — tet10 elements, tri6 facets, several named surfaces, follower
+pressure and the Robin BC — was run end to end by FEBio 4.13 on an 8,731
+element patch cut out of the apex before committing to the full model.
+
+## Still open
+
+The atrial end-diastolic pressures are a modelling decision, not something the
+geometry settles. `ED_PRESSURE_MMHG` currently uses LV 10, RV 10 (the values
+of Pfaller et al. 2019) with LA 10 and RA 5; physiological mean atrial
+pressures are 8-12 mmHg on the left and 2-6 mmHg on the right.

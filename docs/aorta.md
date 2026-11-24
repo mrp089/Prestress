@@ -115,3 +115,53 @@ to a follower pressure plus a fixed nodal force vector:
 | `surface` | Eq. 9 literally: `int N_a (sigma_ef . n) ds` over the lumen |
 | `laplace` | Sec. 2.4 made local: `-sigma_hoop h/r` along the luminal normal, with the local thickness and radius |
 | `nodal` | exact: `-int sigma_ef . grad(N_a) dv` |
+
+## Two things the cylinder hid
+
+A structured cylinder is forgiving in ways a branched patient-specific wall is
+not, and both of these only showed up here.
+
+**The fibre nodal forces carried no load controller.** FEBio's `nodal_force`
+takes `FE_PARAM_ADDLC`, so a `value` written without an `lc` attribute is held
+constant for the whole analysis — while the luminal pressure ramps from zero
+over five steps. The first load step therefore saw the complete fibre
+prestress against a tenth of the pressure meant to balance it. On the cylinder
+the imbalance is small next to the elastin stiffness and the solve rides
+through it; on the aorta it is not. The converged fixed point does not depend
+on the path, so every cylinder number is unchanged (still `8.571366e-12 mm` in
+11 iterations) — only the robustness differs.
+
+**Five equal load steps are not enough.** Branch junctions pass through
+configurations that a 20 % load increment cannot resolve. The AIM solves now
+run with FEBio's auto time stepper, which changes the path and not the answer.
+
+## Eq. 9 does not merely contribute nothing — it is actively destructive
+
+With both fixes in place the `surface` variant still cannot be loaded at all.
+FEBio drives the step size down to `1.85e-5` and gives up at **13.9 % of the
+in vivo pressure** with negative jacobians, after four minutes of retries.
+
+That is the sharper form of the result above. Because `sigma_ef . n = 0` in the
+continuum, *everything* the discrete surface integral produces is
+discretisation error: a load with no consistent direction, set by how far the
+flat facet normals of a decimated triangulation stray from the smooth surface
+normal. It is not a small approximation to the right load, it is a sampling of
+noise — `4.0e3 mN` of resultant that the wall has no way to carry. Its
+`|f|max` of `4.3e2 mN` sits on free nodes, not on the clamped rings.
+
+The exact `nodal` forces are larger still (`9.1e2 mN` peak) but their resultant
+is `4.6e-11 mN`: they are the discrete divergence of a self-equilibrated stress
+field, so they cancel the way the continuum says they should. Magnitude was
+never the problem; consistency was.
+
+### Why the forces are high-frequency, and why that is correct
+
+On this mesh the stress tensor `sigma_ef` jumps by 22 % between adjacent nodes
+(99th percentile 79 %). That is not noise in the fibre field: the wall normal
+itself turns 15° across a typical edge, because 3.36 mm edges on a 7.2 mm
+radius vessel give only about 13 elements around the circumference. A tangent
+fibre field on a curved surface genuinely rotates that fast. The resulting
+nodal forces oscillate in sign between neighbours and largely cancel, leaving
+the physical Laplace-like resultant — which is why the median nodal force
+(44 mN) is several times the median pressure force (18 mN) while the net
+fibre effect is only about 8 % of the load.
