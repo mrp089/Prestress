@@ -68,12 +68,19 @@ class MaterialParams:
     c1: float = 235.0               # [kPa]
     c2: float = 4.08                # [-]
     lam_dep: float = 1.1            # deposition (pre-)stretch of the fibre family
+    n_families: int = 1             # fibre families sharing phi_ef
+    fiber_angle_deg: float = 0.0    # +/- this angle from the local axial direction
     # loading
     pressure_mmHg: float = 120.0
 
     @property
     def phi_e(self) -> float:
         return 1.0 - self.phi_ef
+
+    @property
+    def phi_per_family(self) -> float:
+        """Mass fraction of one fibre family."""
+        return self.phi_ef / self.n_families
 
     @property
     def K(self) -> float:
@@ -108,8 +115,14 @@ class MaterialParams:
 # "implied" -- the elastin modulus that reproduces the unloaded dimensions
 #             reported in the manuscript; the least-squares fit to the reported
 #             unloaded length is 262 kPa (see docs/corrections.md).
+# "aorta"  -- the human thoracic aorta of Sec. 2.4: elastin and two diagonal
+#             fibre families at +/-30 degrees to the axial direction, at
+#             130 mmHg, with the elastin modulus of Parikh et al. 2023.
 PRESETS: dict[str, MaterialParams] = {
     "paper": MaterialParams(name="paper"),
+    "aorta": MaterialParams(name="aorta", phi_ef=0.40, c_e=1000.0,
+                            n_families=2, fiber_angle_deg=30.0,
+                            pressure_mmHg=130.0),
     "mouse": MaterialParams(name="mouse", c_e=89.71 / 2.0, lam_dep=1.25),
     "implied": MaterialParams(name="implied", c_e=260.0),
 }

@@ -92,6 +92,63 @@ def test_0d_reproduces_reported_dimensions():
     assert abs(r.L - 2.10) < 0.005
 
 
+def test_tet10_matches_febio():
+    """The tet10 rule and shape functions reproduce FEBio's FETet10G8.
+
+    FEBio's default for tet10 is the 8-point rule (``FEModelBuilder.cpp``
+    sets ``m_ntet10 = FE_TET10G8``), not the 4-point one.  A wrong rule is
+    silent: the AIM still converges, just to a different configuration.
+    """
+    import numpy as np
+    from prestress.elements import element_for
+
+    e = element_for("tet10")
+    assert e.n_gp == 8 and e.n_node == 10
+
+    # the weights integrate the reference tetrahedron exactly
+    assert abs(e.weights.sum() - 1.0 / 6.0) < 1e-12
+
+    N, G = e.values(), e.grads()
+    assert np.allclose(N.sum(axis=1), 1.0)          # partition of unity
+    assert np.allclose(G.sum(axis=1), 0.0)          # gradients sum to zero
+
+    # a quadratic element reproduces a quadratic field exactly, so the rule
+    # must integrate x^2 over the unit tet exactly: int r^2 dV = 1/60
+    xi = e.points
+    assert abs((e.weights * xi[:, 0] ** 2).sum() - 1.0 / 60.0) < 1e-9
+
+    # shape functions are nodal: N_a(xi_b) = delta_ab at the ten nodes
+    nodes = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1],
+                      [.5, 0, 0], [.5, .5, 0], [0, .5, 0],
+                      [0, 0, .5], [.5, 0, .5], [0, .5, .5]], dtype=float)
+    H = np.stack([e._val(p) for p in nodes])
+    assert np.allclose(H, np.eye(10), atol=1e-12)
+
+
+def test_heart_surfaces_are_outward():
+    """The tri6 faces pulled off the tet10 heart close and point outward."""
+    import numpy as np
+
+    vtu = Path(__file__).resolve().parents[1] / "eva.vtu"
+    if not vtu.exists():        # the heart mesh is not in the repository
+        return
+
+    from prestress.elements import element_for
+    from prestress.heart import _boundary_faces, load_heart
+
+    h = load_heart(str(vtu))
+    t = h.nodes[_boundary_faces(h.elements)[:, :3]]
+    v_surf = np.einsum("ij,ij->i", t[:, 0], np.cross(t[:, 1], t[:, 2])).sum() / 6.0
+
+    e = element_for("tet10")
+    det = np.linalg.det(np.einsum("ena,gnb->egab", h.nodes[h.elements], e.grads()))
+    v_quad = float((det * e.weights[None, :]).sum())
+
+    assert det.min() > 0.0                                   # no inverted elements
+    assert v_surf > 0.0                                      # outward orientation
+    assert abs(v_surf - v_quad) / v_quad < 1e-10             # the boundary closes
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

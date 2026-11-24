@@ -58,6 +58,12 @@ class FEModel:
     facet_type: str = "quad4"
     nodesets: dict = field(default_factory=dict)      # name -> node ids
     bcs: tuple = ()                        # (name, nodeset, (x, y, z)) triples
+    # Beyond the single pressurised surface above: the heart has four
+    # endocardial surfaces at different end-diastolic pressures and two
+    # elastically supported ones (pericardium, great vessels).
+    surfaces: dict = field(default_factory=dict)      # name -> facets
+    pressures: tuple = ()                  # (surface, value [kPa]) pairs
+    robin: tuple = ()                      # (name, surface, k_n, k_t) tuples
 
     @property
     def n_node(self) -> int:
@@ -231,6 +237,47 @@ def _fmt_mp_map(name: str, values: np.ndarray) -> str:
 # ---------------------------------------------------------------------------
 # model writers
 # ---------------------------------------------------------------------------
+def _fmt_surfaces(model: FEModel) -> str:
+    """The named surfaces beyond the primary pressurised one."""
+    return "".join(
+        f'    <Surface name="{name}">\n'
+        + _fmt_facets(facets, model.facet_type) + "\n"
+        + "    </Surface>\n"
+        for name, facets in model.surfaces.items()
+        if len(facets)            # FEBio fails initialisation on an empty surface
+    )
+
+
+def _fmt_pressures(model: FEModel) -> str:
+    """Follower pressures on the extra surfaces, ramped by the same curve."""
+    return "".join(
+        f'    <surface_load name="p_{surf}" type="pressure" surface="{surf}">\n'
+        f'      <pressure lc="1">{value:.16g}</pressure>\n'
+        "      <linear>0</linear>\n"
+        "      <symmetric_stiffness>0</symmetric_stiffness>\n"
+        "    </surface_load>\n"
+        for surf, value in model.pressures
+        if len(model.surfaces.get(surf, ()))
+    )
+
+
+def _fmt_robin(model: FEModel) -> str:
+    """Elastic support (FEBio ``Robin BC``, i.e. BACI's ROBIN SPRING DASHPOT).
+
+    ``k_t = 0`` gives a spring that acts along the surface normal only, which
+    is how the pericardial constraint of Pfaller et al. (2019) is posed;
+    ``k_t = k_n`` is an isotropic spring to ground, used at the great vessels.
+    """
+    return "".join(
+        f'    <surface_load name="{name}" type="Robin BC" surface="{surf}">\n'
+        f'      <normal_stiffness lc="1">{kn:.16g}</normal_stiffness>\n'
+        f'      <tangential_stiffness lc="1">{kt:.16g}</tangential_stiffness>\n'
+        "    </surface_load>\n"
+        for name, surf, kn, kt in model.robin
+        if len(model.surfaces.get(surf, ()))
+    )
+
+
 def _assemble(
     path: Path,
     model: FEModel,
@@ -271,6 +318,7 @@ def _assemble(
     <Surface name="lumen">
 {_fmt_facets(model.facets, model.facet_type)}
     </Surface>
+{_fmt_surfaces(model)}\
 {_fmt_nodesets(model.nodesets)}
 {extra_nodesets}\
   </Mesh>
@@ -289,6 +337,8 @@ def _assemble(
       <linear>0</linear>
       <symmetric_stiffness>0</symmetric_stiffness>
     </surface_load>
+{_fmt_pressures(model)}\
+{_fmt_robin(model)}\
 {extra_loads}\
   </Loads>
   <LoadData>
@@ -328,6 +378,7 @@ def write_elastin_feb(
     n_steps: int = 5, etol: float = 1e-16, rtol: float = 1e-16,
     min_residual: float = 1e-16, max_refs: int = 200, plot: bool = False,
     laugon: bool = True, augtol: float = 1e-8, maxaug: int = 30,
+    auto_step: bool = False,
 ) -> Path:
     """Elastin-only model used inside the AIM (FEBio's built-in Mooney-Rivlin).
 
@@ -335,6 +386,13 @@ def write_elastin_feb(
     represents the embedded fibre stress exactly, see
     ``kinematics.fiber_nodal_forces``.  The solver is still a black box: it
     only ever sees an isotropic material, a pressure and nodal loads.
+
+    ``auto_step`` turns on FEBio's auto time stepper.  A structured cylinder
+    reaches the in vivo state in five equal load steps, but a patient-specific
+    wall does not: branch junctions pass through configurations that a fixed
+    40 % load increment cannot resolve, and the step fails with negative
+    jacobians.  Sub-stepping changes only the path, not the converged state,
+    so it costs nothing but time.
     """
     path = Path(path)
     model = _as_model(mesh)
@@ -344,6 +402,15 @@ def write_elastin_feb(
         f"    <step_size>{1.0 / n_steps}</step_size>\n"
         "    <plot_level>PLOT_MAJOR_ITRS</plot_level>\n"
         "    <output_level>OUTPUT_FINAL</output_level>\n"
+        + (
+            '    <time_stepper type="default">\n'
+            f"      <dtmin>{1.0 / n_steps * 1e-4:.12g}</dtmin>\n"
+            f"      <dtmax>{1.0 / n_steps:.12g}</dtmax>\n"
+            "      <max_retries>15</max_retries>\n"
+            "      <opt_iter>10</opt_iter>\n"
+            "    </time_stepper>\n"
+            if auto_step else ""
+        )
         + _SOLVER.format(etol=etol, rtol=rtol, min_residual=min_residual,
                          max_refs=max_refs)
     )
@@ -365,7 +432,7 @@ def write_elastin_feb(
         loads = (
             '    <nodal_load name="fiber_forces" type="nodal_force" '
             'node_set="all">\n'
-            '      <value type="map">fiber_force</value>\n'
+            '      <value lc="1" type="map">fiber_force</value>\n'
             "    </nodal_load>\n"
         )
     meshdata = _fmt_node_map("fiber_force", nodal_forces) if nodal_forces is not None else ""

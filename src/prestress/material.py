@@ -27,7 +27,7 @@ __all__ = [
 # Embedded fibre family
 # ---------------------------------------------------------------------------
 def fiber_cauchy_stress_2pk(p: MaterialParams, lam: float | None = None) -> float:
-    """Scalar 2nd Piola-Kirchhoff stress of the fibre family, ``S = 2 dpsi/dI4e``.
+    """Scalar 2nd PK stress of *one* fibre family, ``S = 2 dpsi/dI4e``.
 
     ``S_ef = phi_ef * c1 * (I4e - 1) * exp(c2 (I4e - 1)^2)`` with ``I4e = lam^2``.
     The fibre contribution to the 2nd PK tensor is ``S_ef * G^2 * (M (x) M)``
@@ -37,7 +37,7 @@ def fiber_cauchy_stress_2pk(p: MaterialParams, lam: float | None = None) -> floa
     """
     lam = p.lam_dep if lam is None else lam
     i4 = lam * lam
-    return p.phi_ef * p.c1 * (i4 - 1.0) * np.exp(p.c2 * (i4 - 1.0) ** 2)
+    return p.phi_per_family * p.c1 * (i4 - 1.0) * np.exp(p.c2 * (i4 - 1.0) ** 2)
 
 
 def fiber_cauchy_stress(p: MaterialParams, lam: float | None = None,

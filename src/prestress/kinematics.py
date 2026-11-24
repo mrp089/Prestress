@@ -14,6 +14,10 @@ __all__ = [
     "circumferential",
     "prestretch_maps",
     "fiber_nodal_forces",
+    "fiber_stress_tensors",
+    "nodal_forces_from_stress",
+    "surface_fiber_forces",
+    "laplace_relief_forces",
 ]
 
 
@@ -82,48 +86,106 @@ def prestretch_maps(mesh, X: np.ndarray, x: np.ndarray):
     return lam, np.linalg.det(Ge)
 
 
-def fiber_nodal_forces(mesh, p, lam_fiber: float | None = None,
-                       deviatoric: bool = True) -> np.ndarray:
-    """Nodal forces that represent the embedded fibre stress *exactly*.
+def fiber_stress_tensors(elements, elem_type: str, families, deviatoric: bool = True):
+    """Prescribed fibre Cauchy stress at every integration point.
 
-    The weak form of the mixture (Eq. 6 of the manuscript) is
-
-        int sigma_e : de dv  =  int t.du ds  -  int sigma_ef : de dv,
-
-    and the last term is known a priori, because the fibres are deposited at a
-    prescribed stretch.  Integrating it against the shape functions on the
-    in vivo mesh gives a fixed nodal force vector
-
-        f_a = - int sigma_ef . grad(N_a) dv,
-
-    which any solver can apply.  Unlike the effective pressure of Sec. 2.4 this
-    is not an approximation: at convergence the deformed configuration is the
-    in vivo one, so the forces are evaluated exactly where they belong.
-
-    With ``deviatoric=True`` only the deviatoric part of ``sigma_ef`` is
-    assembled.  For an incompressible mixture that makes no difference -- the
-    hydrostatic part does no virtual work, because ``tr(de) = d(ln J) = 0`` --
-    and it matches the split FEBio's uncoupled materials make internally, so
-    the two formulations then agree at any finite bulk penalty.
-
-    Returns an (n_node, 3) array in the same units as the pressure times mm^2.
+    ``families`` is a sequence of ``(sigma, directions)``: the tissue-level
+    Cauchy stress the family carries along its own direction, and that
+    direction as an (n_node, 3) nodal field.  Directions are interpolated to
+    the integration points and renormalised, so a curved vessel keeps a smooth
+    fibre architecture.
     """
-    from .material import fiber_cauchy_stress
-    from .mesh import GAUSS_2x2x2, hex8_shape_grad
+    from .elements import element_for
 
-    sigma = fiber_cauchy_stress(p, lam_fiber)
-    dn = np.stack([hex8_shape_grad(g) for g in GAUSS_2x2x2])      # (gp, 8, 3)
-    xe = mesh.nodes[mesh.hexes]                                   # (ne, 8, 3)
-    jac = np.einsum("eni,gnj->egij", xe, dn)                      # dx/dxi
-    detJ = np.linalg.det(jac)
-    gradN = np.einsum("gnj,egjk->egnk", dn, np.linalg.inv(jac))   # dN_a/dx
-
-    M = circumferential(gauss_positions(mesh, mesh.nodes))        # (ne, gp, 3)
-    S = sigma * np.einsum("egi,egj->egij", M, M)                  # sigma_ef tensor
+    el = element_for(elem_type)
+    N = el.values()                                   # (gp, n)
+    S = None
+    for sigma, dirs in families:
+        m = np.einsum("gn,eni->egi", N, np.asarray(dirs)[elements])
+        m /= np.linalg.norm(m, axis=-1, keepdims=True)
+        term = sigma * np.einsum("egi,egj->egij", m, m)
+        S = term if S is None else S + term
     if deviatoric:
         S = S - np.eye(3) * (np.trace(S, axis1=-2, axis2=-1)[..., None, None] / 3.0)
+    return S
 
-    fe = -np.einsum("egij,egnj,eg->eni", S, gradN, detJ)          # 2x2x2 weights = 1
-    f = np.zeros_like(mesh.nodes)
-    np.add.at(f, mesh.hexes, fe)
+
+def nodal_forces_from_stress(nodes, elements, elem_type: str, S) -> np.ndarray:
+    """Assemble ``f_a = -int sigma . grad(N_a) dv`` over the given mesh.
+
+    This is the term the manuscript drops between Eqs. 6 and 7.  Because the
+    fibre stress is prescribed a priori it can be integrated once, on the
+    imaged geometry, and handed to the solver as nodal loads -- exactly, and
+    without the solver needing to know anything about fibres.
+    """
+    from .elements import element_for
+
+    el = element_for(elem_type)
+    dn, w = el.grads(), el.weights
+    xe = np.asarray(nodes)[elements]
+    jac = np.einsum("eni,gnj->egij", xe, dn)
+    detJ = np.linalg.det(jac)
+    gradN = np.einsum("gnj,egjk->egnk", dn, np.linalg.inv(jac))
+
+    fe = -np.einsum("egij,egnj,eg,g->eni", S, gradN, detJ, w)
+    f = np.zeros_like(np.asarray(nodes), dtype=float)
+    np.add.at(f, elements, fe)
+    return f
+
+
+def fiber_nodal_forces(mesh, p, lam_fiber: float | None = None,
+                       deviatoric: bool = True) -> np.ndarray:
+    """Nodal forces representing the embedded fibre stress of the cylinder.
+
+    Thin wrapper that builds the single circumferential family and calls the
+    general assembly above.  See ``nodal_forces_from_stress`` for why this is
+    exact rather than an approximation.
+    """
+    from .material import fiber_cauchy_stress
+
+    sigma = fiber_cauchy_stress(p, lam_fiber)
+    circ = circumferential(mesh.nodes)
+    S = fiber_stress_tensors(mesh.hexes, "hex8", [(sigma, circ)], deviatoric)
+    return nodal_forces_from_stress(mesh.nodes, mesh.hexes, "hex8", S)
+
+
+def surface_fiber_forces(nodes, facets, S_facet) -> np.ndarray:
+    """Nodal forces from a traction ``sigma . n`` on triangular facets.
+
+    This is Eq. 9 of the manuscript taken literally: the fibre contribution
+    enters only as a surface traction.  For any fibre architecture lying in the
+    wall, ``sigma_ef . n`` vanishes identically on the luminal surface, so this
+    assembles to (discretisation) noise -- which is the point.
+    """
+    P = np.asarray(nodes)[facets]
+    tn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    area = np.linalg.norm(tn, axis=1) / 2.0
+    n = tn / (2.0 * area[:, None])
+    trac = np.einsum("fij,fj->fi", S_facet, n) * area[:, None] / 3.0
+
+    f = np.zeros_like(np.asarray(nodes), dtype=float)
+    for k in range(3):
+        np.add.at(f, facets[:, k], trac)
+    return f
+
+
+def laplace_relief_forces(nodes, facets, hoop_stress, thickness, radius) -> np.ndarray:
+    """Nodal forces for the thin-wall pressure relief of Sec. 2.4, made local.
+
+    The manuscript replaces the fibre contribution by ``P_eff = P - sigma h/r``,
+    which needs a single hoop stress, thickness and radius.  On a vessel where
+    all three vary this is the natural generalisation: the relief is applied
+    pointwise as ``-sigma_hoop h/r`` along the luminal normal.
+    """
+    P = np.asarray(nodes)[facets]
+    tn = np.cross(P[:, 1] - P[:, 0], P[:, 2] - P[:, 0])
+    area = np.linalg.norm(tn, axis=1) / 2.0
+    n = tn / (2.0 * area[:, None])
+
+    hr = (np.asarray(thickness)[facets] / np.asarray(radius)[facets]).mean(axis=1)
+    trac = (-hoop_stress * hr)[:, None] * n * area[:, None] / 3.0
+
+    f = np.zeros_like(np.asarray(nodes), dtype=float)
+    for k in range(3):
+        np.add.at(f, facets[:, k], trac)
     return f

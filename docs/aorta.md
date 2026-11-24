@@ -80,11 +80,38 @@ Two smaller traps on the way:
   against 50 mm coordinates and its sign is meaningless, so any loop testing
   `volume <= 0` runs forever. The thinning is floored.
 
-## What this geometry is good for
+## What this geometry shows about Eq. 9
 
-On the cylinder, Eq. 9 taken literally gives `sigma_ef . n = 0` on the lumen
-(the fibres are circumferential, the normal is radial), which is why Sec. 2.4
-quietly substituted the resultant instead. With ±30° diagonal fibres on the
-aorta, `sigma_ef . n` is **not** zero, so Eq. 9 is directly implementable — and
-can be compared against the exact nodal-force assembly on the kind of geometry
-the manuscript actually targets.
+The fibres lie in the plane of the wall. On the luminal surface the outward
+normal is perpendicular to that plane, so
+
+```
+sigma_ef . n  =  sum_families sigma (m . n) m  =  0
+```
+
+**exactly**, for any in-plane fibre architecture at any angle — the cylinder's
+circumferential family and the aorta's ±30° diagonal families alike. The angle
+only sets the direction *within* the tangent plane.
+
+So Eq. 9, taken literally, contributes **nothing at all**. The whole fibre
+contribution sits in the volume term dropped between Eqs. 6 and 7
+(`docs/corrections.md` §5). On the cylinder this is invisible, because Sec. 2.4
+silently replaces it with a thin-wall pressure reduction
+`P_eff = P - sigma h/r` that is a different construction, not an implementation
+of Eq. 9. On a patient-specific aorta there is no such substitute in the
+manuscript: the method as written has no stated way to account for the fibres.
+
+Discretised, the surface term is not quite zero — the flat facet normals of a
+decimated triangulation differ from the smooth surface normal by about 6°
+(median), so `|m . n|` has a median of 0.10 — but it has no consistent
+direction and its resultant is `4.0e3 mN` against a pressure force of
+`1.29e6 mN`, i.e. 0.3 %.
+
+`scripts/run_aorta.py` therefore compares three variants, all of which reduce
+to a follower pressure plus a fixed nodal force vector:
+
+| variant | fibre contribution |
+|---|---|
+| `surface` | Eq. 9 literally: `int N_a (sigma_ef . n) ds` over the lumen |
+| `laplace` | Sec. 2.4 made local: `-sigma_hoop h/r` along the luminal normal, with the local thickness and radius |
+| `nodal` | exact: `-int sigma_ef . grad(N_a) dv` |

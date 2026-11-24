@@ -31,6 +31,20 @@ def _wedge_volumes(x: np.ndarray, wedges: np.ndarray) -> np.ndarray:
     return vol
 
 
+def _wedge_min_jacobian(x: np.ndarray, wedges: np.ndarray) -> np.ndarray:
+    """Smallest ``det(dx/dxi)`` over the element's integration points.
+
+    This, not the total volume, is what FEBio checks when it initialises the
+    mesh: a wedge can have positive volume and still be inverted at one Gauss
+    point, and FEBio then refuses the model outright.
+    """
+    from .elements import element_for
+
+    dn = element_for("penta6").grads()            # (gp, 6, 3)
+    jac = np.einsum("eni,gnj->egij", x[wedges], dn)
+    return np.linalg.det(jac).min(axis=1)
+
+
 @dataclass
 class WallMesh:
     """Solid wall discretised into wedge elements, layered through the thickness."""
@@ -44,6 +58,7 @@ class WallMesh:
     thickness: np.ndarray      # (n_surf,) wall thickness [mm]
     n_layers: int
     n_surf: int                # nodes per layer
+    node_fields: dict = None   # per-node fields, aligned with ``nodes``
 
     @property
     def n_node(self) -> int:
@@ -185,8 +200,16 @@ def _build(pts, nrm, faces, thickness, n_layers):
 
 def extrude_wall(surf, thickness: np.ndarray, n_layers: int = 2,
                  smooth_normal_iters: int = 5, max_relax: int = 60,
-                 grading: float = 0.5, drop_bad: bool = True) -> WallMesh:
+                 grading: float = 0.5, drop_bad: bool = True,
+                 node_fields: dict | None = None) -> WallMesh:
     """Extrude the lumen surface outwards into ``n_layers`` of wedge elements.
+
+    ``node_fields`` maps a name to a per-*surface*-node array (fibre
+    directions, thickness, radius, ...).  Each is repeated on every layer and
+    carried through the element dropping and node renumbering, so the result is
+    always aligned with ``nodes``.  Doing this by hand outside is a trap: the
+    renumbering silently misaligns every surface field, and the model then
+    loads parts of the wall the wrong way round.
 
     Where the outward extrusion would fold -- concave patches at branch
     junctions, whose radius of curvature is smaller than the wall thickness --
@@ -214,48 +237,23 @@ def extrude_wall(surf, thickness: np.ndarray, n_layers: int = 2,
         warnings.warn(f"reversed {flip.sum()} of {len(faces)} wall triangles "
                       "whose normal opposed the extrusion direction")
 
-    # A handful of triangles -- slivers, or spots where the node normals
-    # diverge by tens of degrees -- fold at the nominal thickness.  Thin the
-    # wall at their nodes only.  Smoothing that reduction is what made an
-    # earlier version oscillate: it pulled neighbouring nodes down and inverted
-    # *their* elements, so the bad set wandered instead of emptying.
-    thickness0 = thickness.copy()
-    edge_len = {i: np.linalg.norm(pts[n] - pts[i], axis=1) for i, n in enumerate(nbr)}
-    for _ in range(max_relax):
-        nodes, wedges = _build(pts, nrm, faces, thickness, n_layers)
-        bad = _wedge_volumes(nodes, wedges) <= 0.0
-        if not bad.any():
-            break
-        hit = np.unique(wedges[bad] % n_surf)
-        thickness[hit] = np.maximum(0.6 * thickness[hit],
-                                    0.01 * thickness0[hit])
-        # Grade the field: |h_i - h_j| <= grading * |x_i - x_j| for neighbours.
-        # Without this the thinned nodes sit next to full-thickness ones and
-        # the element is so skewed that it inverts anyway -- which is what made
-        # pure local thinning stall.  The sweep only ever lowers h, so it
-        # terminates.
-        for _ in range(4):
-            upd = np.array([np.min(thickness[n] + grading * edge_len[i])
-                            if len(n) else thickness[i]
-                            for i, n in enumerate(nbr)])
-            thickness = np.minimum(thickness, upd)
-    else:
-        # The crotch between a branch and the trunk can have a concave radius
-        # of curvature smaller than any usable wall thickness; there the
-        # outward offset self-intersects however gently it is tapered.  (This
-        # is geometry, not meshing: the *undecimated* surface folds worst of
-        # all, because it resolves those creases most faithfully.)  A handful
-        # of elements are simply dropped.
+    # Thinning the wall where it folds does not help: the number of inverted
+    # elements plateaus at ~0.1 % whatever the thickness (0.14 % at 0.10 r,
+    # 0.09 % at 0.02 r), because those elements invert for geometric reasons.
+    # Thinning only creates slivers -- the volume range reached 350,000:1 and
+    # FEBio diverged on the resulting mesh -- so the folding elements are
+    # dropped instead and the rest of the wall keeps its full thickness.
+    nodes, wedges = _build(pts, nrm, faces, thickness, n_layers)
+    bad = _wedge_min_jacobian(nodes, wedges) <= 0.0
+    if bad.any():
         if not drop_bad:
-            raise RuntimeError(f"{bad.sum()} wedges still invert after "
-                               f"{max_relax} passes")
-        keep = ~bad
+            raise RuntimeError(f"{bad.sum()} of {len(wedges)} wedges invert")
         import warnings
         warnings.warn(f"dropped {bad.sum()} of {len(wedges)} wedges that fold "
                       "at every thickness (concave branch junctions)")
-        dropped_tris = np.unique(np.flatnonzero(bad) % len(faces))
-        wedges = wedges[keep]
-        faces = np.delete(faces, dropped_tris, axis=0)
+        lost_layer0 = np.unique(np.flatnonzero(bad[:len(faces)]))
+        wedges = wedges[~bad]
+        faces = np.delete(faces, lost_layer0, axis=0)
 
     # pressure acts on the lumen; FEBio applies t = -p n, so the facet winding
     # has to give a normal pointing *into* the lumen
@@ -269,10 +267,29 @@ def extrude_wall(surf, thickness: np.ndarray, n_layers: int = 2,
     ring = np.unique([i for e, n in edges.items() if n == 1 for i in e])
     ring_nodes = np.concatenate([ring + k * n_surf for k in range(n_layers + 1)])
 
+    fields = {k: np.concatenate([np.asarray(v)] * (n_layers + 1))
+              for k, v in (node_fields or {}).items()}
+
+    used = np.zeros(len(nodes), bool)
+    used[np.unique(wedges)] = True
+    if not used.all():
+        # an unreferenced node carries no stiffness and makes the system
+        # singular, so renumber it away
+        remap = np.full(len(nodes), -1)
+        remap[used] = np.arange(used.sum())
+        nodes = nodes[used]
+        fields = {k: v[used] for k, v in fields.items()}
+        wedges = remap[wedges]
+        lumen = remap[lumen]
+        ring_nodes = remap[ring_nodes]
+        ring_nodes = ring_nodes[ring_nodes >= 0]
+        if (lumen < 0).any():
+            lumen = lumen[~(lumen < 0).any(axis=1)]
+
     return WallMesh(nodes=nodes, wedges=wedges, lumen_facets=lumen,
                     ring_nodes=ring_nodes, normals=nrm,
                     radius=np.zeros(n_surf), thickness=thickness,
-                    n_layers=n_layers, n_surf=n_surf)
+                    n_layers=n_layers, n_surf=n_surf, node_fields=fields)
 
 
 # ---------------------------------------------------------------------------

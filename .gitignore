@@ -8,3 +8,6 @@ output/
 *.log
 *.dylib
 *.so
+
+# the Pfaller19 heart mesh (33 MB); see docs/heart.md for its provenance
+eva.vtu

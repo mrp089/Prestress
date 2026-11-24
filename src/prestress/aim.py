@@ -35,7 +35,7 @@ from .kinematics import fiber_nodal_forces, prestretch_maps
 from .mesh import CylinderMesh
 from .params import MaterialParams
 
-__all__ = ["AIMResult", "run_aim", "make_solver"]
+__all__ = ["AIMResult", "run_aim", "make_solver", "make_force_solver"]
 
 
 @dataclass
@@ -167,3 +167,32 @@ def run_aim(
         residual=res, change=chg, beta=betas,
         configs=configs, displacements=disps, converged=converged,
     )
+
+
+def make_force_solver(
+    model,
+    p: MaterialParams,
+    pressure: float,
+    workdir: str | Path,
+    forces: np.ndarray | None = None,
+    n_steps: int = 5,
+    **feb_kw,
+):
+    """``S(X, k) -> x`` for any mesh, with the fibre contribution as nodal loads.
+
+    All three ways of accounting for the fibres reduce to the same thing once
+    assembled -- a follower pressure plus a fixed nodal force vector -- so the
+    aorta variants differ only in how ``forces`` was built.
+    """
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    def solve(X: np.ndarray, k: int) -> np.ndarray:
+        stem = f"aim_{k:03d}"
+        feb = write_elastin_feb(workdir / f"{stem}.feb", model, p, pressure,
+                                coords=X, nodal_forces=forces,
+                                n_steps=n_steps, **feb_kw)
+        run_febio(feb)
+        return read_node_log(workdir / f"{stem}_pos.txt", model.n_node)
+
+    return solve
