@@ -123,6 +123,7 @@ def run_aim(
     beta_min: float = 0.05,
     beta_max: float = 2.0,
     max_backtrack: int = 4,
+    tol: float | None = None,
 ) -> AIMResult:
     """Run Algorithm 1 and return the stress-free elastin configuration.
 
@@ -139,6 +140,17 @@ def run_aim(
     rescued the iteration stops and returns the best configuration so far
     rather than raising, so a run that converged usefully before stalling
     still yields a result.
+
+    ``tol`` is an absolute target on ``max|U|``.  Algorithm 1 as written stops
+    on ``eps_c``, the *relative change* between successive residuals, which
+    declares success as soon as progress becomes slow however large the
+    residual still is.  On the cylinder the two agree, because convergence is
+    fast and the residual falls off a cliff.  On the aorta they do not: the
+    relative criterion fires at ``max|U| = 2.6e-1 mm``, a quarter of a
+    millimetre of error in the prestressed geometry, simply because the
+    contraction rate is about 0.93 per iteration.  With ``tol`` set, the
+    relative criterion is demoted to a stall detector and reported as such
+    instead of being called convergence.
     """
     x_target = mesh.nodes.copy()
     X = x_target.copy()          # X_1 <- x
@@ -198,8 +210,18 @@ def run_aim(
             print(f"  AIM {k:3d}:  max|U| = {r:.6e} mm   c = {c:.3e}"
                   f"   beta = {betas[-1]:+.4f}")
 
-        if k > 2 and chg[-2] < eps_c and chg[-1] < eps_c:
+        if tol is not None and r < tol:
             converged = True
+            break
+        if k > 2 and chg[-2] < eps_c and chg[-1] < eps_c:
+            if tol is None:
+                converged = True       # Algorithm 1 as written
+            else:
+                stalled = True
+                if verbose:
+                    print(f"       residual change below eps_c = {eps_c:g} "
+                          f"at max|U| = {r:.3e} mm, still above tol = "
+                          f"{tol:g}: stalled, not converged")
             break
 
         U_prev = U

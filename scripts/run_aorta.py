@@ -98,6 +98,14 @@ def main() -> None:
                     help="enforce incompressibility by augmented Lagrangian "
                          "(accurate on the cylinder, unaffordable here)")
     ap.add_argument("--augtol", type=float, default=1e-4)
+    # Aitken wanted beta = 3.7 and the cap of 2.0 costs real convergence rate
+    # (the residual contracts by only ~0.93 per iteration here).  Backtracking
+    # makes a large cap safe: an overshoot that FEBio cannot load is halved
+    # and retried instead of ending the run.
+    ap.add_argument("--beta-max", type=float, default=8.0)
+    ap.add_argument("--tol", type=float, default=1e-3,
+                    help="absolute target on max|U| [mm]; Algorithm 1's "
+                         "relative criterion becomes a stall detector")
     args = ap.parse_args()
 
     outdir = Path(args.outdir)
@@ -150,7 +158,8 @@ def main() -> None:
                                   max_ups=args.max_ups, opt_iter=args.opt_iter,
                                   laugon=args.laugon, augtol=args.augtol)
         try:
-            aim = run_aim(model, solve, max_iter=args.max_iter)
+            aim = run_aim(model, solve, max_iter=args.max_iter,
+                          beta_max=args.beta_max, tol=args.tol)
         except RuntimeError as exc:
             # A variant that cannot be loaded at all is a result, not a crash:
             # keep going so the ones that work are still compared.
