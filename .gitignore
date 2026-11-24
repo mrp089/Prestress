@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+external/FEBio/
+external/FEMBE_Plugin/
+output/
+*.xplt
+*.log
+*.dylib
+*.so
