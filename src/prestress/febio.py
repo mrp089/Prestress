@@ -427,7 +427,7 @@ def write_elastin_feb(
         '    <material id="1" name="wall_material" type="Mooney-Rivlin">\n'
         "      <density>1.0</density>\n"
         f"      <c1>{p.phi_e * p.c_e:.12g}</c1>\n"
-        "      <c2>0</c2>\n"
+        f"      <c2>{p.mr_c2:.12g}</c2>\n"
         f"      <k>{p.K:.12g}</k>\n"
         "    </material>\n"
     )

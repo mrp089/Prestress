@@ -64,6 +64,10 @@ class MaterialParams:
     # elastin
     c_e: float = 1000.0             # [kPa]  stiffness-like parameter of elastin
     bulk_ratio: float = 1000.0      # K = bulk_ratio * c_e
+    mr_c2: float = 0.0              # [kPa] second Mooney-Rivlin parameter of
+                                    # the ground substance.  Zero is Eq. 11;
+                                    # the heart of Pfaller et al. (2019) uses
+                                    # an isochoric Mooney-Rivlin with c2 != 0.
     # fibres
     c1: float = 235.0               # [kPa]
     c2: float = 4.08                # [-]
@@ -125,4 +129,13 @@ PRESETS: dict[str, MaterialParams] = {
                             pressure_mmHg=130.0),
     "mouse": MaterialParams(name="mouse", c_e=89.71 / 2.0, lam_dep=1.25),
     "implied": MaterialParams(name="implied", c_e=260.0),
+    # Passive myocardium of Pfaller et al. (2019): an isochoric Mooney-Rivlin
+    # (C1 = 7.0, C2 = 0.04 kPa) plus a Sussman-Bathe volumetric penalty
+    # (kappa = 1e3 kPa).  No turning-over fibre family and no active stress --
+    # the active stress is switched off while prestressing -- so the heart is
+    # a purely elastic AIM problem.  phi_ef = 0 makes phi_e = 1, so the
+    # written c1 is c_e itself.  pressure_mmHg is the LV end-diastolic value;
+    # the other three chambers are set in prestress.heart.
+    "heart": MaterialParams(name="heart", phi_ef=0.0, c_e=7.0, mr_c2=0.04,
+                            bulk_ratio=1e3 / 7.0, pressure_mmHg=10.0),
 }
