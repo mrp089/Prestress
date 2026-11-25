@@ -63,7 +63,7 @@ def main() -> None:
     args = ap.parse_args()
 
     outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
-    surf, mesh, radius, f1, f2 = build_wall(
+    surf, mesh, radius, _, _ = build_wall(
         Path("output/aorta/radius.npz"), args.src, args.thickness_frac)
     model = wall_model(mesh)
     nf = mesh.node_fields
@@ -81,8 +81,10 @@ def main() -> None:
                   opt_iter=args.opt_iter, auto_step=True, laugon=False)
 
     # the exact fibre contribution, as dead nodal forces on the imaged mesh
+    # the wall's own node fields, not the surface ones build_wall returns:
+    # extrude_wall repeats and renumbers them to match model.elements
     S = fiber_stress_tensors(model.elements, model.elem_type,
-                             [(sig, f1), (sig, f2)])
+                             [(sig, fibers[0]), (sig, fibers[1])])
     forces = nodal_forces_from_stress(mesh.nodes, model.elements,
                                       model.elem_type, S)
 
