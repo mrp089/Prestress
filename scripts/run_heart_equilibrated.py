@@ -66,6 +66,15 @@ def main() -> None:
                     help="add the active muscle tone of Gebauer Eq. (8); off "
                          "by default, since this is an end-diastolic state")
     ap.add_argument("--max-iter", type=int, default=40)
+    # The equilibration is a fixed point in its own right and its
+    # contraction rate is a property of the mesh and material, not of
+    # the threshold it starts from.  On the aorta it is 0.19 per
+    # iteration and 10 steps reach 2.4e-7 mm.  The heart mixture
+    # contracts at 0.42, so the library default of 12 stops it at
+    # ~1e-4 mm -- which would show up in the ladder as a floor that
+    # is nothing but a truncated fixed point.  Give it room.
+    ap.add_argument("--equil-max-iter", type=int, default=40)
+    ap.add_argument("--equil-tol", type=float, default=1e-6)
     ap.add_argument("--n-steps", type=int, default=10)
     ap.add_argument("--rtol", type=float, default=1e-6)
     ap.add_argument("--etol", type=float, default=1e-8)
@@ -136,7 +145,8 @@ def main() -> None:
         r_eq, x_eq, hist = equilibrated_forces_residual(
             model, mat, aim.X, h.nodes, fibers,
             outdir / "febio" / f"{tag}_equil", sigma=sigmas,
-            n_steps=args.n_steps, **feb_kw)
+            n_steps=args.n_steps, max_iter=args.equil_max_iter,
+            tol=args.equil_tol, **feb_kw)
 
         U = np.linalg.norm(x_eq - h.nodes, axis=1)
         rows.append(dict(threshold=thr, aim_residual=r_aim,

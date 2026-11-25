@@ -13,6 +13,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import warnings
+
 import numpy as np
 
 from .febio import (read_node_log, read_node_log_all, run_febio,
@@ -226,4 +228,15 @@ def equilibrated_forces_residual(
                   f"residual {r:.6e} mm")
         if move < tol:
             break
+    else:
+        # Stopping here is not a converged equilibrium, and the residual it
+        # returns carries whatever the fixed point had left to move.  That
+        # would show up in a threshold ladder as a floor, and be read as a
+        # property of the method rather than of this loop -- so say so.
+        warnings.warn(
+            f"equilibration stopped at the cap of {max_iter} iterations with "
+            f"the configuration still moving {move:.3e} mm per step "
+            f"(tol {tol:.1e}); the returned residual {r:.3e} mm is an upper "
+            f"bound, not an equilibrium",
+            RuntimeWarning, stacklevel=2)
     return float(np.abs(x - x_target).max()), x, history
