@@ -153,8 +153,13 @@ def to_cells(values_gp: np.ndarray) -> np.ndarray:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--case", required=True,
-                    choices=["cylinder", "aorta", "heart"])
+    ap.add_argument("--case", choices=["cylinder", "aorta", "heart"],
+                    help="required unless --from-vtu is given")
+    ap.add_argument("--from-vtu", type=Path, default=None,
+                    help="replay the figures from an archived .vtu: it carries "
+                         "the mesh, the displacement, the principal stretches "
+                         "and their directions, so neither the source geometry "
+                         "nor FEBio is needed")
     ap.add_argument("--npz", type=Path, default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--glyphs", type=int, default=260,
@@ -176,6 +181,14 @@ def main() -> None:
                          "not a prestress result)")
     args = ap.parse_args()
 
+    if not args.case and not args.from_vtu:
+        raise SystemExit("give --case, or --from-vtu to replay an archive")
+
+    import pyvista as _pv
+    if args.from_vtu and not args.case:
+        # the case name travels with the archive so the camera comes out right
+        args.case = str(_pv.read(args.from_vtu).field_data["case"][0])
+
     preset = CASE_VIEW[args.case]
     view = args.view or preset["view"]
     azim = preset["azimuth"] if args.azimuth is None else args.azimuth
@@ -188,55 +201,75 @@ def main() -> None:
     import pyvista as pv
     pv.OFF_SCREEN = True
 
-    x, elements, etype, X, title = load_case(args.case, args.npz)
     out = Path(args.out or f"output/{args.case}/fig_prestress_{args.case}")
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    # --- kinematics ---------------------------------------------------------
-    diag_hint = float(np.linalg.norm(x.max(axis=0) - x.min(axis=0)))
-    F = deformation_gradients(X, x, elements, etype)          # X -> in vivo
-    lam_gp, dirs_gp = principal_stretches(F)
-    lam = to_cells(lam_gp)                                    # (n_elem, 3)
-    J = to_cells(np.linalg.det(F))
-    u = x - X
-    umag = np.linalg.norm(u, axis=1)
+    if args.from_vtu:
+        grid = pv.read(args.from_vtu)
+        lam = np.column_stack([grid.cell_data[f"lambda{i + 1}"]
+                               for i in range(3)])
+        dirs = np.stack([np.asarray(grid.cell_data[f"dir{i + 1}"])
+                         for i in range(3)], axis=2)
+        u = np.asarray(grid.point_data["displacement"])
+        umag = np.asarray(grid.point_data["|u| [mm]"])
+        J = np.asarray(grid.cell_data["J"])
+        live = np.asarray(grid.cell_data["prestressed"]).astype(bool)
+        flat = ~live
+        title = str(grid.field_data["title"][0])
+        print(f"  replaying {args.from_vtu} ({grid.n_cells} cells)")
+        if flat.any():
+            print(f"  {flat.sum()} excluded elements carried in the archive")
+    else:
+        x, elements, etype, X, title = load_case(args.case, args.npz)
 
-    # principal_stretches returns directions in the REFERENCE configuration
-    # (eigenvectors of C).  The glyphs are drawn on the in-vivo mesh, so push
-    # them forward: n_i = F v_i / |F v_i|.
-    F0, V0 = F[:, 0], dirs_gp[:, 0]
-    dirs = np.einsum("eij,ejk->eik", F0, V0)
-    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+        # --- kinematics ---------------------------------------------------------
+        diag_hint = float(np.linalg.norm(x.max(axis=0) - x.min(axis=0)))
+        F = deformation_gradients(X, x, elements, etype)          # X -> in vivo
+        lam_gp, dirs_gp = principal_stretches(F)
+        lam = to_cells(lam_gp)                                    # (n_elem, 3)
+        J = to_cells(np.linalg.det(F))
+        u = x - X
+        umag = np.linalg.norm(u, axis=1)
 
-    # Two populations are excluded from the glyphs and the histograms, both
-    # for the same reason: their stretch is imposed, not computed.
-    #   1. elements at F = I, which carry no prestretch at all;
-    #   2. elements with a node that never moved, i.e. sitting on the rigidly
-    #      held boundary -- one clamped face fixes two of the three principal
-    #      stretches at exactly 1 and piles those elements against the
-    #      lambda_1 >= 1 >= lambda_3 bound as a spike.
-    at_identity = (np.abs(lam - 1.0) < FLAT_TOL).all(axis=1)
-    held = (np.linalg.norm(u, axis=1) < FLAT_TOL * diag_hint)[elements].any(axis=1)
-    flat = at_identity | held
-    live = ~flat
-    if flat.any():
-        print(f"  excluding {flat.sum()} of {len(lam)} elements "
-              f"({100 * flat.mean():.2f} %) from glyphs and histograms: "
-              f"{at_identity.sum()} at F = I, "
-              f"{(held & ~at_identity).sum()} on the held boundary")
+        # principal_stretches returns directions in the REFERENCE configuration
+        # (eigenvectors of C).  The glyphs are drawn on the in-vivo mesh, so push
+        # them forward: n_i = F v_i / |F v_i|.
+        F0, V0 = F[:, 0], dirs_gp[:, 0]
+        dirs = np.einsum("eij,ejk->eik", F0, V0)
+        dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
 
-    # --- grid ---------------------------------------------------------------
-    vtk_type = {"hex8": 12, "penta6": 13, "tet10": 24}[etype]
-    npe = elements.shape[1]
-    cells = np.c_[np.full(len(elements), npe), elements].ravel()
-    grid = pv.UnstructuredGrid(cells, np.full(len(elements), vtk_type, np.uint8), x)
-    grid.point_data["displacement"] = u
-    grid.point_data["|u| [mm]"] = umag
-    for i in range(3):
-        grid.cell_data[f"lambda{i + 1}"] = lam[:, i]
-        grid.cell_data[f"dir{i + 1}"] = dirs[:, :, i]
-    grid.cell_data["J"] = J
-    grid.cell_data["prestressed"] = live.astype(np.uint8)
+        # Two populations are excluded from the glyphs and the histograms, both
+        # for the same reason: their stretch is imposed, not computed.
+        #   1. elements at F = I, which carry no prestretch at all;
+        #   2. elements with a node that never moved, i.e. sitting on the rigidly
+        #      held boundary -- one clamped face fixes two of the three principal
+        #      stretches at exactly 1 and piles those elements against the
+        #      lambda_1 >= 1 >= lambda_3 bound as a spike.
+        at_identity = (np.abs(lam - 1.0) < FLAT_TOL).all(axis=1)
+        held = (np.linalg.norm(u, axis=1) < FLAT_TOL * diag_hint)[elements].any(axis=1)
+        flat = at_identity | held
+        live = ~flat
+        if flat.any():
+            print(f"  excluding {flat.sum()} of {len(lam)} elements "
+                  f"({100 * flat.mean():.2f} %) from glyphs and histograms: "
+                  f"{at_identity.sum()} at F = I, "
+                  f"{(held & ~at_identity).sum()} on the held boundary")
+
+        # --- grid ---------------------------------------------------------------
+        vtk_type = {"hex8": 12, "penta6": 13, "tet10": 24}[etype]
+        npe = elements.shape[1]
+        cells = np.c_[np.full(len(elements), npe), elements].ravel()
+        grid = pv.UnstructuredGrid(cells, np.full(len(elements), vtk_type, np.uint8), x)
+        grid.point_data["displacement"] = u
+        grid.point_data["|u| [mm]"] = umag
+        for i in range(3):
+            grid.cell_data[f"lambda{i + 1}"] = lam[:, i]
+            grid.cell_data[f"dir{i + 1}"] = dirs[:, :, i]
+        grid.cell_data["J"] = J
+        grid.cell_data["prestressed"] = live.astype(np.uint8)
+        # make the archive self-describing, so --from-vtu needs nothing else
+        grid.field_data["case"] = np.array([args.case])
+        grid.field_data["title"] = np.array([title])
 
     surf = grid.extract_surface()
     centres = grid.cell_centers().points

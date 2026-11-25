@@ -38,10 +38,24 @@ TITLES = {"cylinder": "idealised cylinder",
 COLOR = {"cylinder": "#1f77b4", "aorta": "#d62728", "heart": "#2ca02c"}
 
 
+def _find(root: Path, *candidates: str) -> Path:
+    """First candidate that exists under root.
+
+    --root takes either a local ``output/`` tree or an unpacked release
+    archive, which flattens the same files under ``ladders/`` and ``aim/``.
+    """
+    for c in candidates:
+        p = root / c
+        if p.is_file():
+            return p
+    raise FileNotFoundError(str(root / candidates[0]))
+
+
 def load(case: str, root: Path) -> dict:
     """Residual history and, where it exists, the equilibrated ladder."""
     if case == "cylinder":
-        d = json.loads((root / "thresholds/summary.json").read_text())
+        d = json.loads(_find(root, "thresholds/summary.json",
+                             "ladders/cylinder_thresholds.json").read_text())
         # the nodal variant, to match the aorta run
         v = d.get("nodal", next(iter(d.values())))
         return dict(residual=np.asarray(v["residual"], float),
@@ -49,14 +63,17 @@ def load(case: str, root: Path) -> dict:
                            for s in v["stops"]],
                     elastic=False)
     if case == "aorta":
-        res = np.load(root / "p97/aim_nodal.npz")["residual"]
-        rows = json.loads((root / "aorta_equil/summary.json").read_text())
+        res = np.load(_find(root, "p97/aim_nodal.npz",
+                            "aim/aorta_aim.npz"))["residual"]
+        rows = json.loads(_find(root, "aorta_equil/summary.json",
+                                "ladders/aorta_equilibrated.json").read_text())
         return dict(residual=np.asarray(res, float),
                     stops=[(r["aim_iterations"], r["aim_residual"],
                             r["equilibrated_max"]) for r in rows],
                     elastic=False)
     if case == "heart":
-        h = json.loads((root / "heart/summary_heart.json").read_text())
+        h = json.loads(_find(root, "heart/summary_heart.json",
+                             "ladders/heart_summary.json").read_text())
         return dict(residual=np.asarray(h["residual"], float),
                     stops=[], elastic=True)
     raise SystemExit(case)

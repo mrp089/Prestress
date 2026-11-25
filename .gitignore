@@ -17,3 +17,6 @@ eva.vtu
 
 output/aorta/logs/
 .DS_Store
+dist/
+data/
+figures/
