@@ -66,6 +66,9 @@ def main() -> None:
     ap.add_argument("--outdir", default="output/aorta")
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--thickness-frac", type=float, default=0.10)
+    ap.add_argument("--pressure-mmhg", type=float, default=None,
+                    help="override the in vivo pressure, to test how the "
+                         "convergence rate depends on the load")
     ap.add_argument("--max-iter", type=int, default=25)
     ap.add_argument("--n-steps", type=int, default=10,
                       help="load steps per AIM solve (auto stepper sub-divides)")
@@ -116,6 +119,9 @@ def main() -> None:
     workroot = Path(args.workdir) if args.workdir else outdir / "febio"
 
     mat = PRESETS["aorta"]
+    if args.pressure_mmhg is not None:
+        import dataclasses
+        mat = dataclasses.replace(mat, pressure_mmHg=args.pressure_mmhg)
     surf, mesh, radius, f1, f2 = build_wall(outdir / "radius.npz", args.src,
                                             args.thickness_frac)
     model = wall_model(mesh)

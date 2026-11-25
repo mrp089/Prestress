@@ -14,3 +14,5 @@ eva.vtu
 
 # the VMR model folder (user-supplied, 190 MB)
 0012_H_AO_H/
+
+output/aorta/logs/
