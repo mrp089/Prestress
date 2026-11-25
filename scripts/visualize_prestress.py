@@ -46,9 +46,12 @@ def load_case(case: str, npz: Path | None):
     if case == "aorta":
         from prestress.febio import wall_model
         from run_aorta import SRC, build_wall
-        _, mesh, *_ = build_wall(Path("output/aorta/radius.npz"), SRC, 0.10)
+        # radius.npz is written beside the AIM result by run_aorta.py, so the
+        # wall is always rebuilt from the cache belonging to *this* run.
+        npz = Path(npz or "output/p97/aim_nodal.npz")
+        _, mesh, *_ = build_wall(npz.parent / "radius.npz", SRC, 0.10)
         m = wall_model(mesh)
-        d = np.load(npz or "output/aorta_nodal/aim_nodal.npz")
+        d = np.load(npz)
         return mesh.nodes, m.elements, m.elem_type, d["X"], "VMR 0012_H_AO_H aorta"
     if case == "heart":
         from prestress.heart import CHAMBERS, heart_model, load_heart

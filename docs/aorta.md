@@ -212,3 +212,68 @@ edges on a 10.1 mm radius give about 41 elements around the circumference,
 against 13 on the old surface. The old mesh was coarse enough that the wall
 normal turned 15 degrees across a typical edge and `sigma_ef` jumped 22 %
 between adjacent nodes.
+
+## Equilibrated G&R: the AIM residual is not the error that matters
+
+Run the AIM to a given residual, then hand the result to the mechanobiologically
+equilibrated G&R step and let it relax: whatever it moves is spurious, because
+an equilibrated mixture handed its own homeostatic state should not move at
+all. Six stopping thresholds at 97 mmHg on VMR `0012_H_AO_H`:
+
+| AIM stopped at [mm] | iterations | equilibrated max [mm] | p99 | median | ratio |
+|---|---|---|---|---|---|
+| 2.534e-01 |  5 | 2.625e-01 | 2.49e-01 | 2.05e-02 |  1.04 |
+| 5.789e-02 |  8 | 7.767e-02 | 6.14e-02 | 5.63e-03 |  1.34 |
+| 1.693e-02 | 11 | 3.515e-02 | 3.03e-02 | 3.16e-03 |  2.08 |
+| 5.006e-03 | 15 | 2.537e-02 | 2.62e-02 | 3.11e-03 |  5.07 |
+| 1.899e-03 | 17 | 2.533e-02 | 2.62e-02 | 3.13e-03 | 13.34 |
+| 9.894e-04 | 18 | 2.522e-02 | 2.62e-02 | 3.13e-03 | 25.49 |
+
+**The spurious displacement hits a floor at 2.52e-02 mm and stays there.** The
+last three rows tighten the AIM by a factor of five and move the equilibrated
+result by 0.6 %. The growing ratio in the last column is not amplification — it
+is a constant numerator divided by a shrinking denominator.
+
+Two consequences:
+
+* **Iterating the AIM past ~1e-02 mm on this geometry buys nothing.** Rows 4-6
+  cost seven extra iterations, roughly 40 % of the total solve time, for no
+  change in the quantity a G&R study actually cares about. Reporting a tighter
+  AIM residual as evidence of a better reference configuration is reporting the
+  wrong number.
+* **The floor is set by the G&R step, not by the AIM.** It is the mismatch
+  between the elastic prestress problem the AIM solves and the equilibrated
+  mixture that consumes its answer -- the fibre stress the AIM assumes is
+  homeostatic is not exactly the stress the equilibrated material produces in
+  the configuration the AIM converges to. Driving it down needs a different
+  fixed point, not a tighter tolerance on this one.
+
+The median tells the same story from the other side: it is 3.1e-03 mm from row 3
+onward, i.e. the bulk of the wall stops moving long before the maximum does, and
+what remains is a tail concentrated in the descending aorta.
+
+## Do the principal stretches point where they should?
+
+The glyph figure draws the principal directions, but a projection of a curved
+tube does not let a reader check an orientation. `scripts/check_principal_frame.py`
+measures it against the wall's own (circumferential, axial, radial) frame,
+recovered exactly from the two helical fibre families the mesh carries
+(`f1 + f2` is axial, `f1 - f2` circumferential):
+
+```
+                      circ.      axial     radial
+lambda_1 (med 1.0247)  19.4 deg   74.1 deg   85.4 deg    closest to circ.  87.5 %
+lambda_2 (med 0.9987)  73.7 deg   23.2 deg   83.3 deg    closest to axial  82.5 %
+lambda_3 (med 0.9771)  85.3 deg   83.1 deg   10.0 deg    closest to radial 93.0 %
+```
+
+So the prestress is circumferential extension with through-wall thinning and
+very slight axial shortening, which is what a pressurised clamped tube should
+do. The radial direction is the sharpest (10 deg median, 93 %); the in-plane
+pair is looser because lambda_1 and lambda_2 are close in magnitude over much of
+the wall, so their eigenvectors are free to rotate within the plane.
+
+One trap worth recording: `extrude_wall` **renumbers nodes** when it drops
+unreferenced ones, so recovering a surface index by `node_index % n_surf` is
+wrong and produces a plausible-looking 45 deg mush. `node_fields` survive the
+remap; index arithmetic does not.
