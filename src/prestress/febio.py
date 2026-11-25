@@ -469,10 +469,17 @@ def write_cmm_feb(
     etol: float = 1e-16, rtol: float = 1e-16, min_residual: float = 1e-16,
     max_refs: int = 200, plot: bool = False, adaptive: bool = True,
     laugon: bool = True, augtol: float = 1e-8, maxaug: int = 30,
+    max_ups: int = 0, opt_iter: int = 8,
+    fiber: np.ndarray | None = None,
 ) -> Path:
     """Constrained mixture model (plugin), optionally with growth & remodelling.
 
-    ``lam_ref`` and ``J_ref`` are (n_elem, 8) arrays of ``|G_e M|`` and
+    ``fiber`` is an optional (n_node, 3) field of fibre directions in the
+    reference configuration.  Without it the plugin uses a cylindrical fibre
+    about the z axis, which is right for the idealised vessel and meaningless
+    anywhere else.
+
+    ``lam_ref`` and ``J_ref`` are (n_elem, n_gp) arrays of ``|G_e M|`` and
     ``det(G_e)`` at the integration points; they map the stress-free elastin
     mesh ``coords`` back onto the in vivo configuration.  The pressure is ramped
     over ``t in [0, t_gr]`` in ``n_steps`` and then held constant until
@@ -493,7 +500,7 @@ def write_cmm_feb(
         f"      <dtmin>{dt * 1e-3:.12g}</dtmin>\n"
         f"      <dtmax>{dt:.12g}</dtmax>\n"
         "      <max_retries>6</max_retries>\n"
-        "      <opt_iter>8</opt_iter>\n"
+        f"      <opt_iter>{opt_iter}</opt_iter>\n"
         "      <aggressiveness>0</aggressiveness>\n"
         "    </time_stepper>\n"
         if adaptive else ""
@@ -523,14 +530,17 @@ def write_cmm_feb(
         f"      <t_gr>{t_gr:.12g}</t_gr>\n"
         + ('      <lam_ref type="map">lam_ref</lam_ref>\n' if lam_ref is not None else "")
         + ('      <J_ref type="map">J_ref</J_ref>\n' if J_ref is not None else "")
-        + '      <fiber type="cylindrical">\n'
-          "        <center>0,0,0</center>\n"
-          "        <axis>0,0,1</axis>\n"
-          "        <vector>0,1,0</vector>\n"
-          "      </fiber>\n"
-        "    </material>\n"
+        + ('      <fiber type="map">fiber_dir</fiber>\n' if fiber is not None else
+           '      <fiber type="cylindrical">\n'
+           "        <center>0,0,0</center>\n"
+           "        <axis>0,0,1</axis>\n"
+           "        <vector>0,1,0</vector>\n"
+           "      </fiber>\n")
+        + "    </material>\n"
     )
     blocks = []
+    if fiber is not None:
+        blocks.append(_fmt_node_map("fiber_dir", fiber))
     if lam_ref is not None:
         blocks.append(_fmt_mp_map("lam_ref", lam_ref))
     if J_ref is not None:

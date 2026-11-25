@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from .febio import (read_node_log, read_node_log_all, run_febio,
-                    write_cmm_feb)
+                    write_cmm_feb, write_elastin_feb)
 from .kinematics import prestretch_maps
 from .mesh import CylinderMesh
 from .params import MaterialParams
@@ -153,3 +153,68 @@ def equilibrated_residual(
     run_febio(feb, plugin=True)
     x = read_node_log(workdir / "equil_pos.txt", mesh.n_node)
     return float(np.abs(x - mesh.nodes).max()), x
+
+
+def equilibrated_forces_residual(
+    model, p, X: np.ndarray, x_target: np.ndarray, fibers, workdir,
+    sigma: float | None = None, n_steps: int = 10, max_iter: int = 12,
+    tol: float = 1e-6, verbose: bool = True, **feb_kw,
+) -> tuple[float, np.ndarray, list[float]]:
+    """Equilibrated constrained mixture, solved as a black box on any mesh.
+
+    At mechanobiological equilibrium every turning-over constituent is back at
+    its deposition stretch *by definition*, so each fibre family carries the
+    prescribed homeostatic Cauchy stress ``sigma_h`` along its own direction.
+    No time stepping and no mass-production parameters are needed -- see
+    ``docs/growth.md``.
+
+    The difference from the AIM's ``nodal`` variant is that here the fibre
+    stress is a **follower** load rather than a dead one.  The AIM may compute
+    its nodal forces once, on the imaged geometry, because at its own fixed
+    point the configuration *is* the imaged geometry.  The equilibrated state
+    is a different question -- where does this prestressed wall actually come
+    to rest? -- and the answer has the fibres convected and the forces
+    integrated over the deformed volume.  So the forces are recomputed on the
+    current configuration and the solve repeated until they stop moving it.
+
+    This needs no plugin and no constrained-mixture material: the solver still
+    sees only an isotropic solid, a follower pressure and nodal loads.  The
+    one approximation is that the mass is held fixed, which is the same one
+    :func:`equilibrated_residual` makes.
+
+    ``fibers`` is a sequence of (n_node, 3) direction fields, one per family.
+    Returns ``(max |x - x_target|, x, history)``.
+    """
+    from .kinematics import (convect_directions, deformation_gradients,
+                             nodal_forces_from_stress, stress_from_gp_directions)
+    from .material import fiber_cauchy_stress
+
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    sig = fiber_cauchy_stress(p) if sigma is None else sigma
+
+    x = np.asarray(X, dtype=float).copy()
+    history: list[float] = []
+    for it in range(1, max_iter + 1):
+        F = deformation_gradients(X, x, model.elements, model.elem_type)
+        S = stress_from_gp_directions(
+            [(sig, convect_directions(f, F, model.elements, model.elem_type))
+             for f in fibers])
+        forces = nodal_forces_from_stress(x, model.elements, model.elem_type, S)
+
+        feb = write_elastin_feb(workdir / f"equil_{it:03d}.feb", model, p,
+                                p.pressure, coords=X, nodal_forces=forces,
+                                n_steps=n_steps, **feb_kw)
+        run_febio(feb)
+        x_new = read_node_log(workdir / f"equil_{it:03d}_pos.txt", model.n_node)
+
+        move = float(np.abs(x_new - x).max())
+        x = x_new
+        r = float(np.abs(x - x_target).max())
+        history.append(r)
+        if verbose:
+            print(f"    equil {it:3d}:  moved {move:.4e} mm   "
+                  f"residual {r:.6e} mm")
+        if move < tol:
+            break
+    return float(np.abs(x - x_target).max()), x, history

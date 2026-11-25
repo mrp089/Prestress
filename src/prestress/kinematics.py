@@ -7,6 +7,7 @@ import numpy as np
 from .mesh import GAUSS_2x2x2, CylinderMesh, hex8_shape_grad
 
 __all__ = [
+    "deformation_gradients", "convect_directions", "stress_from_gp_directions",
     "deformation_gradient",
     "principal_stretches",
     "right_stretch",
@@ -103,6 +104,51 @@ def fiber_stress_tensors(elements, elem_type: str, families, deviatoric: bool = 
     for sigma, dirs in families:
         m = np.einsum("gn,eni->egi", N, np.asarray(dirs)[elements])
         m /= np.linalg.norm(m, axis=-1, keepdims=True)
+        term = sigma * np.einsum("egi,egj->egij", m, m)
+        S = term if S is None else S + term
+    if deviatoric:
+        S = S - np.eye(3) * (np.trace(S, axis1=-2, axis2=-1)[..., None, None] / 3.0)
+    return S
+
+
+def deformation_gradients(X, x, elements, elem_type: str) -> np.ndarray:
+    """``F = dx/dX`` at every integration point of any element type.
+
+    Returns ``(n_elem, n_gp, 3, 3)``.  Unlike :func:`deformation_gradient`
+    this needs no cylinder.
+    """
+    from .elements import element_for
+
+    dn = element_for(elem_type).grads()
+    Jr = np.einsum("eni,gnj->egij", np.asarray(X)[elements], dn)
+    Jc = np.einsum("eni,gnj->egij", np.asarray(x)[elements], dn)
+    return np.einsum("egij,egjk->egik", Jc, np.linalg.inv(Jr))
+
+
+def convect_directions(dirs, F, elements, elem_type: str) -> np.ndarray:
+    """Push a nodal direction field forward: ``m = F M / |F M|``.
+
+    A fibre is a material line, so it rotates and stretches with the body.
+    Returns the unit directions at the integration points, ``(n_elem, n_gp, 3)``.
+    """
+    from .elements import element_for
+
+    N = element_for(elem_type).values()
+    M = np.einsum("gn,eni->egi", N, np.asarray(dirs)[elements])
+    M /= np.linalg.norm(M, axis=-1, keepdims=True)
+    m = np.einsum("egij,egj->egi", F, M)
+    return m / np.linalg.norm(m, axis=-1, keepdims=True)
+
+
+def stress_from_gp_directions(families_gp, deviatoric: bool = True) -> np.ndarray:
+    """Fibre Cauchy stress from directions already given at the Gauss points.
+
+    ``families_gp`` is a sequence of ``(sigma, m)`` with ``m`` of shape
+    ``(n_elem, n_gp, 3)``.  :func:`fiber_stress_tensors` is the same thing for
+    directions given on the nodes of the reference configuration.
+    """
+    S = None
+    for sigma, m in families_gp:
         term = sigma * np.einsum("egi,egj->egij", m, m)
         S = term if S is None else S + term
     if deviatoric:
