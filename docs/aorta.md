@@ -300,19 +300,64 @@ profile:
 
 They are poor-shape wedges **next to the clamped inlet and outlet caps**, where
 the Dirichlet constraint fights the pressure and the local stretch reaches 1.30
-instead of 1.02. Bad shape and large stretch compound, and a penalty bulk
-modulus does the rest. Raising the floor further does not reach them: the
-element at `J = 1.158` has quality 0.526, which is a perfectly ordinary wedge,
-so no defensible floor removes it.
+instead of 1.02. Raising the floor further does not reach them: the element at
+`J = 1.158` has quality 0.526, which is a perfectly ordinary wedge, so no
+defensible floor removes it.
 
-The real levers are elsewhere:
+### The augmented Lagrangian does not cure it
 
-* **`--laugon`** enforces incompressibility by augmented Lagrange instead of a
-  penalty, which removes J drift by construction rather than by shrinking it.
-  It is off by default here because it cost convergence on this geometry.
-* **A better wall mesh.** Extruding from a decimated lumen surface is the
-  limitation; slivers appear where the surface is locally wrinkled, and no
-  post-hoc filter fixes that.
+The obvious suspect is the volumetric penalty, and the obvious remedy is
+`--laugon`, which enforces incompressibility by augmented Lagrange instead.
+That was run at 97 mmHg and measured against the penalty run, first AIM
+iteration against first AIM iteration -- same reference configuration, same
+loads, same element numbering, so the only difference is the constraint.
+
+| | penalty, `K/c1 = 1667` | `--laugon`, `augtol = 1e-4` |
+|---|---|---|
+| median \|J-1\| | 7.92e-05 | 2.02e-05 |
+| 99th percentile | 6.37e-04 | 2.88e-04 |
+| max \|J-1\| | 9.57e-02 | 9.72e-02 |
+| elements over 0.05 | 5 | 5 |
+
+The augmented Lagrangian does what it says in the bulk -- four times tighter at
+the median and the 99th percentile. It does **nothing** to the outliers. The
+same five elements, element for element, to three digits:
+
+| element | penalty J | laugon J |
+|---|---|---|
+| 22378 | 1.0957 | 1.0972 |
+| 24877 | 1.0730 | 1.0759 |
+| 1229 | 1.0694 | 1.0680 |
+| 9231 | 1.0540 | 1.0541 |
+| 46988 | 1.0501 | 1.0511 |
+
+Three of the five are marginally *worse*. So the drift on these elements is not
+a constraint being enforced too softly; it is what a 5:1 sliver reports when it
+is stretched 1.30 next to a clamp. Enforcing J = 1 harder cannot fix a
+quadrature artifact of the element's own shape.
+
+And it is not free. One AIM iteration under `--laugon`:
+
+| | penalty | `--laugon` |
+|---|---|---|
+| Newton solves, 1st AIM iteration | 154 | 19,158 |
+| augmentations | - | 16,719 |
+| wall clock, 1st AIM iteration | ~2 min | 71 min |
+| Newton solves, **all 18** iterations | 10,363 | - |
+
+A single augmented-Lagrange iteration costs 124 times the penalty version's
+first iteration and 1.85 times the **entire** 18-iteration penalty run. At 71
+minutes an iteration the full run would need about 21 hours against a 24-hour
+wall limit, and write a gigabyte of plot file per iteration.
+
+That is the whole case for the default: `--laugon` is 100x the cost for a
+4x improvement in a quantity that was already four orders of magnitude below
+the discretisation error, and no improvement at all in the one place it was
+wanted.
+
+The real lever is elsewhere: **a better wall mesh**. Extruding from a decimated
+lumen surface is the limitation; slivers appear where the surface is locally
+wrinkled, and no post-hoc filter or constraint formulation fixes that.
 
 None of this moves a reported result: 7 elements out of 50,251 is 0.014 %, the
 medians and the 1-99 % ranges are untouched, and the figures are rendered from

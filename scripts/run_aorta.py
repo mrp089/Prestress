@@ -90,13 +90,14 @@ def main() -> None:
                     help="iteration count the auto time stepper aims at")
     # The augmented Lagrangian is the right default on the cylinder, where it
     # removes the volumetric penalty error (9.7e-5 mm at K = 1000 c_e) for
-    # almost nothing.  Here it cannot reach augtol = 1e-8 at all: a single
-    # load step ran to augmentation #27 of 30, and the solve spent 4,306
-    # augmentations -- each a full Newton solve -- to reach t = 0.35.  Every
-    # Newton solve inside them had *already* converged, residual 3.8e-10
-    # against a tolerance of 1.9e-9.  K/c1 = 1667 keeps |J-1| near 1e-4 on its
-    # own, which is far below the discretisation and wall-thickness error on a
-    # patient-specific geometry.
+    # almost nothing.  Here it is measured and rejected (docs/aorta.md): at
+    # augtol = 1e-4 one AIM iteration took 19,158 Newton solves over 16,719
+    # augmentations and 71 minutes, against 154 solves for the penalty
+    # version's first iteration and 10,363 for its entire 18-iteration run.
+    # What it buys is a 4x tighter median |J-1| (7.9e-5 -> 2.0e-5), already
+    # orders of magnitude below the discretisation error -- and nothing at all
+    # on the five sliver elements that motivated trying it, which report the
+    # same J to three digits under both schemes.
     ap.add_argument("--laugon", action="store_true",
                     help="enforce incompressibility by augmented Lagrangian "
                          "(accurate on the cylinder, unaffordable here)")
