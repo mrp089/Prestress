@@ -214,7 +214,11 @@ def _build(pts, nrm, faces, thickness, n_layers):
 def extrude_wall(surf, thickness: np.ndarray, n_layers: int = 2,
                  smooth_normal_iters: int = 5, max_relax: int = 60,
                  grading: float = 0.5, drop_bad: bool = True,
-                 min_quality: float = 0.05,
+                 # 0.05 let exactly one sliver through on VMR 0012_H_AO_H
+                 # (quality 0.0527, the worst wedge in the mesh), and that one
+                 # element reached J = 1.22 under the penalty formulation.
+                 # 0.10 removes it and costs one element out of 50,251.
+                 min_quality: float = 0.10,
                  node_fields: dict | None = None) -> WallMesh:
     """Extrude the lumen surface outwards into ``n_layers`` of wedge elements.
 

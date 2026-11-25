@@ -277,3 +277,43 @@ One trap worth recording: `extrude_wall` **renumbers nodes** when it drops
 unreferenced ones, so recovering a surface index by `node_index % n_surf` is
 wrong and produces a plausible-looking 45 deg mush. `node_fields` survive the
 remap; index arithmetic does not.
+
+## The J = 1.22 element
+
+`max |J-1| = 2.21e-01` on the aorta against a histogram tight at 1.000 +- 0.002
+is one element, and it is worth naming rather than leaving as an outlier.
+
+Element 19126 is **the worst-shaped wedge in the mesh**: quality
+`min(det)/mean(det) = 0.0527`, rank 0 of 50,251, a 5.6:1 sliver (shortest edge
+0.33 mm, longest 1.86 mm). It passed because `extrude_wall`'s floor was
+`min_quality = 0.05` and it sits 5 % above it. The floor is now `0.10`, which
+drops that one wedge and nothing else.
+
+That is a tidy-up, not a cure. All seven elements with `|J-1| > 0.05` share a
+profile:
+
+| | these 7 | mesh median |
+|---|---|---|
+| quality | 0.234 | 0.981 |
+| distance to a clamped ring node | 5.8 mm | 16.7 mm |
+| lambda_1 | 1.303 | 1.025 |
+
+They are poor-shape wedges **next to the clamped inlet and outlet caps**, where
+the Dirichlet constraint fights the pressure and the local stretch reaches 1.30
+instead of 1.02. Bad shape and large stretch compound, and a penalty bulk
+modulus does the rest. Raising the floor further does not reach them: the
+element at `J = 1.158` has quality 0.526, which is a perfectly ordinary wedge,
+so no defensible floor removes it.
+
+The real levers are elsewhere:
+
+* **`--laugon`** enforces incompressibility by augmented Lagrange instead of a
+  penalty, which removes J drift by construction rather than by shrinking it.
+  It is off by default here because it cost convergence on this geometry.
+* **A better wall mesh.** Extruding from a decimated lumen surface is the
+  limitation; slivers appear where the surface is locally wrinkled, and no
+  post-hoc filter fixes that.
+
+None of this moves a reported result: 7 elements out of 50,251 is 0.014 %, the
+medians and the 1-99 % ranges are untouched, and the figures are rendered from
+the mesh as it was run.
