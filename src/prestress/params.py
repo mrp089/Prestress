@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+import numpy as np
+
 MMHG_TO_KPA = 0.1333223684  # 1 mmHg in kPa
 
 
@@ -105,6 +107,88 @@ class MaterialParams:
 
 
 # ---------------------------------------------------------------------------
+# Homogenized constrained mixture of the myocardium (Gebauer et al. 2023)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CMMConstituent:
+    """One constituent of a homogenized constrained mixture.
+
+    Gebauer et al. (Biomech Model Mechanobiol 22:1983-2002, 2023) write the
+    mixture energy per unit *mass*, ``Psi = sum_i rho0^i W^i`` (their Eq. 4),
+    so every stiffness in their Table 1 is in J/kg and only becomes a stress
+    once multiplied by a reference mass density in kg/m^3.  That conversion is
+    the one place this is easy to get silently wrong, so it lives here.
+
+    Fibre constituents use the Fung form of their Eq. (5),
+
+        W = a / (2 b) * (exp[b (I4 - 1)^2] - 1),
+
+    and ``b = 0`` marks the isotropic neo-Hookean constituent (elastin, their
+    Eq. 9, ``W = a (I1bar - 3)``).
+    """
+
+    name: str
+    mass_fraction: float            # xi^i of the total reference density
+    a: float                        # [J/kg]
+    b: float = 0.0                  # [-]  Fung exponent; 0 = neo-Hookean
+    lam_h: float = 1.0              # homeostatic (deposition) stretch
+    n_families: int = 1             # families sharing ``mass_fraction``
+
+    def density(self, rho0: float) -> float:
+        """Reference density of one family [kg/m^3]."""
+        return self.mass_fraction * rho0 / self.n_families
+
+    def stiffness_kPa(self, rho0: float) -> float:
+        """``rho0^i * a`` of one family, as a stress [kPa]."""
+        return self.density(rho0) * self.a * 1e-3
+
+    def sigma_h_kPa(self, rho0: float) -> float:
+        """Cauchy stress of one family at its homeostatic stretch [kPa].
+
+        With ``W`` per unit mass and ``I4 = lam_h^2``,
+
+            sigma = 2 rho0^i I4 dW/dI4
+                  = 2 rho0^i I4 a (I4 - 1) exp[b (I4 - 1)^2].
+        """
+        if self.b == 0.0:
+            return 0.0                      # isotropic: no fibre direction
+        i4 = self.lam_h * self.lam_h
+        return (2.0 * self.density(rho0) * i4 * self.a * (i4 - 1.0)
+                * np.exp(self.b * (i4 - 1.0) ** 2) * 1e-3)
+
+
+# Table 1 of Gebauer et al. (2023), verbatim.  The material parameters and
+# homeostatic stretches are themselves adopted there from Braeu et al. (2016).
+GEBAUER23_RHO0 = 1050.0             # [kg/m^3] total reference mass density
+GEBAUER23_KAPPA = 150.0             # [kPa] volumetric penalty
+GEBAUER23 = {
+    # four collagen families: myocyte-fibre, cross-fibre and +/-45 degrees,
+    # with the mass fraction distributed equally between them
+    "collagen": CMMConstituent("collagen", 0.1, a=568.0, b=11.2,
+                               lam_h=1.062, n_families=4),
+    "myocytes": CMMConstituent("myocytes", 0.6, a=7.6, b=11.4, lam_h=1.1),
+    "elastin": CMMConstituent("elastin", 0.3, a=72.0),
+}
+# Active muscle tone, their Eq. (8) after Wilson et al. (2012).  It is part of
+# their *systolic* state; the four-chamber heart here is prestressed at end
+# diastole with the active stress off, as in Pfaller et al. (2019).
+GEBAUER23_ACTIVE = dict(sigma_act_kPa=54.0, lam_0=0.8, lam_max=1.4)
+
+
+def gebauer23_active_stress_kPa(lam: float = 1.1) -> float:
+    """Active myocyte Cauchy stress at fibre stretch ``lam`` [kPa].
+
+    From ``W_act = (sigma_act / rho0) (lam + (lam_max - lam)^3 /
+    (3 (lam_max - lam_0)^2))``, the Cauchy stress is ``rho0^m lam dW/dlam``.
+    """
+    g = GEBAUER23_ACTIVE
+    m = GEBAUER23["myocytes"]
+    dw = (g["sigma_act_kPa"] / GEBAUER23_RHO0) * (
+        1.0 - ((g["lam_max"] - lam) / (g["lam_max"] - g["lam_0"])) ** 2)
+    return m.density(GEBAUER23_RHO0) * lam * dw
+
+
+# ---------------------------------------------------------------------------
 # Parameter sets
 # ---------------------------------------------------------------------------
 # "paper"  -- Table 1 of the manuscript, verbatim.
@@ -138,4 +222,15 @@ PRESETS: dict[str, MaterialParams] = {
     # the other three chambers are set in prestress.heart.
     "heart": MaterialParams(name="heart", phi_ef=0.0, c_e=7.0, mr_c2=0.04,
                             bulk_ratio=1e3 / 7.0, pressure_mmHg=10.0),
+    # The same four-chamber geometry as a constrained mixture, with the
+    # myocardium of Gebauer et al. (2023).  Only the elastin reaches FEBio as
+    # a material; the myocyte and collagen families enter as nodal forces, so
+    # phi_ef = 0 and the written c1 is rho0^e * a^e = 22.68 kPa.
+    "heart_cmm": MaterialParams(
+        name="heart_cmm", phi_ef=0.0,
+        c_e=GEBAUER23["elastin"].stiffness_kPa(GEBAUER23_RHO0),
+        mr_c2=0.0,
+        bulk_ratio=GEBAUER23_KAPPA
+        / GEBAUER23["elastin"].stiffness_kPa(GEBAUER23_RHO0),
+        pressure_mmHg=10.0),
 }

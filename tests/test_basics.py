@@ -149,6 +149,87 @@ def test_heart_surfaces_are_outward():
     assert abs(v_surf - v_quad) / v_quad < 1e-10             # the boundary closes
 
 
+
+
+def test_gebauer23_parameters():
+    """Table 1 of Gebauer et al. (2023), and the J/kg -> kPa conversion.
+
+    Their stiffnesses are energies per unit *mass*, so every one of them is
+    meaningless until multiplied by a reference density.  Getting that step
+    wrong scales every fibre stress by ~10^3 and still runs, so the expected
+    values here are worked out independently of the code:
+
+        sigma = 2 rho0^i I4 a (I4 - 1) exp[b (I4 - 1)^2],  I4 = lam_h^2
+
+    collagen, one of four families:
+        rho0 = 0.1/4 * 1050 = 26.25 kg/m^3,  I4 = 1.062^2 = 1.127844
+        sigma = 2*26.25*1.127844*568*0.127844*exp(11.2*0.127844^2)
+              = 5163.6 Pa
+    myocytes:
+        rho0 = 0.6 * 1050 = 630 kg/m^3,  I4 = 1.21
+        sigma = 2*630*1.21*7.6*0.21*exp(11.4*0.21^2) = 4022.8 Pa
+    """
+    from prestress.params import (GEBAUER23, GEBAUER23_KAPPA, GEBAUER23_RHO0,
+                                  PRESETS, gebauer23_active_stress_kPa)
+
+    rho = GEBAUER23_RHO0
+    assert rho == 1050.0
+    # mass fractions must partition the mixture
+    assert abs(sum(c.mass_fraction for c in GEBAUER23.values()) - 1.0) < 1e-12
+
+    col = GEBAUER23["collagen"].sigma_h_kPa(rho)
+    myo = GEBAUER23["myocytes"].sigma_h_kPa(rho)
+    assert abs(col - 5.1636) < 1e-3, col
+    assert abs(myo - 4.0230) < 1e-3, myo
+    # the isotropic constituent carries no fibre stress
+    assert GEBAUER23["elastin"].sigma_h_kPa(rho) == 0.0
+    # rho0^e * a^e, which is what FEBio receives as Mooney-Rivlin c1
+    assert abs(GEBAUER23["elastin"].stiffness_kPa(rho) - 22.68) < 1e-9
+
+    # active tone at the homeostatic stretch, their Eq. (8)
+    #   630 * 1.1 * (54/1050) * (1 - (0.3/0.6)^2) = 26.73 kPa
+    assert abs(gebauer23_active_stress_kPa(1.1) - 26.73) < 1e-2
+
+    m = PRESETS["heart_cmm"]
+    assert abs(m.phi_e * m.c_e - 22.68) < 1e-9
+    assert abs(m.K - GEBAUER23_KAPPA) < 1e-9
+    assert m.mr_c2 == 0.0
+
+
+def test_heart_cmm_families_are_orthonormal():
+    """The five fibre families, including where fiber1 and fiber2 are parallel.
+
+    About 1 % of nodes in the great vessels carry a sheet direction parallel
+    to the fibre direction, which makes Gram-Schmidt singular.  The fallback
+    must still return unit vectors at the requested angles.
+    """
+    from prestress.heart import cmm_fiber_families
+
+    class _Fake:
+        pass
+
+    rng = np.random.default_rng(0)
+    n = 500
+    f = rng.normal(size=(n, 3))
+    f /= np.linalg.norm(f, axis=1, keepdims=True)
+    s = rng.normal(size=(n, 3))
+    s -= (s * f).sum(1)[:, None] * f
+    s /= np.linalg.norm(s, axis=1, keepdims=True)
+    s[:50] = f[:50]                      # degenerate: sheet parallel to fibre
+
+    h = _Fake()
+    h.fiber1, h.fiber2 = f, s
+    dirs, labels = cmm_fiber_families(h)
+
+    assert len(dirs) == 5 and labels[0] == "myocytes"
+    for d in dirs:
+        assert np.allclose(np.linalg.norm(d, axis=1), 1.0, atol=1e-12)
+    # family angles measured against the myocyte direction
+    for d, want in zip(dirs[1:], (1.0, 0.0, np.cos(np.pi / 4), np.cos(np.pi / 4))):
+        got = np.abs((d * dirs[0]).sum(1))
+        assert np.allclose(got, want, atol=1e-10), (labels, got[:3], want)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

@@ -54,12 +54,12 @@ FLAT_TOL = 1e-6
 
 
 def load_case(case: str, npz: Path | None):
-    """Return (nodes_in_vivo, elements, elem_type, X_unloaded, title)."""
+    """Return (nodes, elements, elem_type, X_unloaded, title, extra)."""
     if case == "cylinder":
         from prestress.mesh import build_cylinder_mesh
         d = np.load(npz or "output/cylinder/aim_paper.npz")
         mesh = build_cylinder_mesh()
-        return mesh.nodes, mesh.hexes, "hex8", d["X"], "idealised cylinder"
+        return mesh.nodes, mesh.hexes, "hex8", d["X"], "idealised cylinder", {}
     if case == "aorta":
         from prestress.febio import wall_model
         from run_aorta import SRC, build_wall
@@ -69,14 +69,18 @@ def load_case(case: str, npz: Path | None):
         _, mesh, *_ = build_wall(npz.parent / "radius.npz", SRC, 0.10)
         m = wall_model(mesh)
         d = np.load(npz)
-        return mesh.nodes, m.elements, m.elem_type, d["X"], "VMR 0012_H_AO_H aorta"
+        return (mesh.nodes, m.elements, m.elem_type, d["X"],
+                "VMR 0012_H_AO_H aorta", {})
     if case == "heart":
         from prestress.heart import CHAMBERS, heart_model, load_heart
         h = load_heart("eva.vtu", surfaces={**CHAMBERS, "vessels": "dsurf20",
                                             "epi": "dsurf8", "base": "dsurf19"})
         m, _ = heart_model(h)
         d = np.load(npz or "output/heart/aim_heart.npz")
-        return h.nodes, m.elements, m.elem_type, d["X"], "Pfaller19 four-chamber heart"
+        cen = np.array([h.nodes[np.unique(h.surfaces[c])].mean(axis=0)
+                        for c in ("LV", "RV", "LA", "RA")])
+        return (h.nodes, m.elements, m.elem_type, d["X"],
+                "Pfaller19 four-chamber heart", {"chambers": cen})
     raise SystemExit(f"unknown case {case!r}")
 
 
@@ -115,6 +119,26 @@ def sparse_grid_pick(pts: np.ndarray, n_target: int) -> np.ndarray:
     first = np.ones(len(order), bool)
     first[1:] = inv[order[1:]] != inv[order[:-1]]
     return order[first]
+
+
+def clip_plane(case: str, grid, extra: dict):
+    """(origin, normal) of the cut, or None for no cut.
+
+    The heart is cut on the **four-chamber plane**: the least-squares plane
+    through the four chamber centroids, which is what opens LV, RV, LA and RA
+    at once.  A coordinate midplane cuts two of them and misses the others.
+    """
+    if case == "heart" and "chambers" in extra:
+        P = np.asarray(extra["chambers"], float)
+        origin = P.mean(axis=0)
+        # smallest singular direction of the centred centroids is the normal
+        normal = np.linalg.svd(P - origin)[2][2]
+        return origin, normal / np.linalg.norm(normal)
+    if case == "cylinder":
+        b = np.asarray(grid.bounds).reshape(3, 2)
+        return np.array([0.0, 0.5 * (b[1, 0] + b[1, 1]), 0.0]), \
+            np.array([0.0, 1.0, 0.0])
+    return None
 
 
 def _tick_fmt(clim) -> str:
@@ -216,11 +240,15 @@ def main() -> None:
         live = np.asarray(grid.cell_data["prestressed"]).astype(bool)
         flat = ~live
         title = str(grid.field_data["title"][0])
+        plane = None
+        if "clip_normal" in grid.field_data:
+            plane = (np.asarray(grid.field_data["clip_origin"], float),
+                     np.asarray(grid.field_data["clip_normal"], float))
         print(f"  replaying {args.from_vtu} ({grid.n_cells} cells)")
         if flat.any():
             print(f"  {flat.sum()} excluded elements carried in the archive")
     else:
-        x, elements, etype, X, title = load_case(args.case, args.npz)
+        x, elements, etype, X, title, extra = load_case(args.case, args.npz)
 
         # --- kinematics ---------------------------------------------------------
         diag_hint = float(np.linalg.norm(x.max(axis=0) - x.min(axis=0)))
@@ -270,6 +298,10 @@ def main() -> None:
         # make the archive self-describing, so --from-vtu needs nothing else
         grid.field_data["case"] = np.array([args.case])
         grid.field_data["title"] = np.array([title])
+        plane = clip_plane(args.case, grid, extra)
+        if plane is not None:
+            grid.field_data["clip_origin"] = np.asarray(plane[0], float)
+            grid.field_data["clip_normal"] = np.asarray(plane[1], float)
 
     surf = grid.extract_surface()
     centres = grid.cell_centers().points
@@ -280,16 +312,39 @@ def main() -> None:
 
     # which elements may seed a glyph: prestressed, and on the shown side
     seedable = live.copy()
-    if clip:
-        mid = 0.5 * (grid.bounds[2] + grid.bounds[3])
-        seedable &= centres[:, 1] <= mid
-        shown = grid.clip("y", origin=(0, mid, 0), invert=True).extract_surface()
+    if clip and plane is not None:
+        origin, normal = plane
+        seedable &= (centres - origin) @ normal <= 0.0
+        shown = grid.clip(normal=normal, origin=origin,
+                          invert=True).extract_surface()
     else:
         shown = surf
     seed_idx = np.flatnonzero(seedable)
     pick = seed_idx[sparse_grid_pick(centres[seed_idx], args.glyphs)]
     print(f"  {len(pick)} direction lines on a sparse grid "
           f"({len(seed_idx)} candidate elements)")
+
+    def set_cam(pl) -> None:
+        """Camera for every panel of this case.
+
+        With a cut, look straight down its normal: a four-chamber section is
+        only worth cutting if the section itself faces the reader.
+        """
+        if clip and plane is not None:
+            origin, normal = plane
+            b = np.asarray(grid.bounds).reshape(3, 2)
+            diag = float(np.linalg.norm(b[:, 1] - b[:, 0]))
+            focus = 0.5 * (b[:, 0] + b[:, 1])
+            up = np.array([0.0, 0.0, 1.0])
+            if abs(np.dot(up, normal)) > 0.9:       # normal nearly vertical
+                up = np.array([0.0, 1.0, 0.0])
+            up = up - np.dot(up, normal) * normal
+            pl.camera_position = [tuple(focus + normal * diag * 1.6),
+                                  tuple(focus), tuple(up / np.linalg.norm(up))]
+            pl.reset_camera()        # fit the whole cut model in the frame
+            pl.camera.zoom(1.0)
+        else:
+            _camera(pl, view, azim, elev)
 
     # --- panel 1: displacement ---------------------------------------------
     pl = pv.Plotter(off_screen=True, window_size=(900, 1100))
@@ -302,7 +357,7 @@ def main() -> None:
                                      title_font_size=18, label_font_size=15))
     pl.add_mesh(surf.copy(), color="k", style="wireframe", opacity=0.06)
     pl.background_color = "white"
-    _camera(pl, view, azim, elev)
+    set_cam(pl)
     png_u = out.with_name(out.name + "_displacement.png")
     pl.screenshot(str(png_u))
     pl.close()
@@ -352,7 +407,7 @@ def main() -> None:
                     f"length x{amp:.0f} about 1",
                     position="upper_left", font_size=11, color="black")
         pl.background_color = "white"
-        _camera(pl, view, azim, elev)
+        set_cam(pl)
         p = out.with_name(out.name + f"_lambda{i + 1}.png")
         pl.screenshot(str(p))
         pl.close()

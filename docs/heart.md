@@ -147,3 +147,87 @@ The atrial end-diastolic pressures are a modelling decision, not something the
 geometry settles. `ED_PRESSURE_MMHG` currently uses LV 10, RV 10 (the values
 of Pfaller et al. 2019) with LA 10 and RA 5; physiological mean atrial
 pressures are 8-12 mmHg on the left and 2-6 mmHg on the right.
+
+## The heart as a constrained mixture (Gebauer et al. 2023)
+
+The heart above is purely elastic, which makes its bottom panel in
+`fig_convergence` degenerate: reloading the same reference configuration
+reproduces the same deformation, so the AIM residual **is** the spurious
+displacement and there is nothing to equilibrate. To put the heart on the
+same footing as the cylinder and the aorta it needs a mixture, and
+`scripts/run_heart_equilibrated.py` gives it the myocardium of
+
+> Gebauer, Pfaller, Braeu, Cyron & Wall, *A homogenized constrained mixture
+> model of cardiac growth and remodeling: analyzing mechanobiological
+> stability and reversal*, Biomech Model Mechanobiol **22**:1983-2002 (2023).
+
+### Their Table 1, transcribed
+
+`prestress.params.GEBAUER23` carries it verbatim. The one trap is that
+Gebauer et al. write the mixture energy **per unit mass** (their Eq. 4,
+`Psi = sum_i rho0^i W^i`), so every stiffness in their table is in J/kg and
+is not a stress until multiplied by a reference density. Getting that step
+wrong rescales every fibre stress by a factor of ~1000 and still runs, so
+`test_gebauer23_parameters` pins the conversion against hand-worked values.
+
+| constituent | xi | a [J/kg] | b | lam_h | families | rho_0^i [kg/m^3] | sigma_h [kPa] |
+|---|---|---|---|---|---|---|---|
+| myocytes | 0.6 | 7.6 | 11.4 | 1.1 | 1 | 630.0 | 4.023 |
+| collagen | 0.1 | 568 | 11.2 | 1.062 | 4 | 26.25 each | 5.163 each |
+| elastin | 0.3 | 72 | - | - | 1 | 315.0 | - (isotropic) |
+
+with `rho_0 = 1050 kg/m^3` and `kappa = 150 kPa`. Elastin is the only
+constituent FEBio sees as a material: `c1 = rho_0^e a^e = 22.68 kPa`,
+`c2 = 0`, `k = 150 kPa`. The myocyte and four collagen families enter as
+nodal forces, exactly as on the aorta, so the solver still sees nothing but
+an isotropic solid, follower pressures and nodal loads. Total fibre stress
+is 24.68 kPa.
+
+The four collagen families lie in the plane of the cardiomyocytes at 0, 90
+and +/-45 degrees to the fibre direction (their Fig. 4), built from the
+mesh's own `fiber1` and `fiber2`. About 1 % of nodes -- in the great vessels,
+where no myocardial architecture is defined -- carry a sheet direction
+*parallel* to the fibre direction, which makes Gram-Schmidt singular;
+`cmm_fiber_families` falls back to an arbitrary perpendicular there, which is
+harmless because those nodes carry no myocardium.
+
+### Two deliberate departures
+
+Their parameters were calibrated on a **systolic prolate-spheroid left
+ventricle** at 120 mmHg; they are used here on an **end-diastolic
+four-chamber** mesh. So:
+
+* the **active muscle tone** of their Eq. (8) is off, as it is in Pfaller
+  et al. (2019) during prestressing. At `lam_h = 1.1` it would add 26.73 kPa
+  along the fibre -- more than the entire passive mixture -- so this is not a
+  detail. `--active` turns it on.
+* the **loading** is end-diastolic (LV/RV 10, LA 10, RA 5 mmHg), not 120 mmHg.
+
+This is therefore their constitutive model on our geometry and loading, not a
+reproduction of their simulation, and the numbers should not be read as such.
+
+### Their own ladder, for comparison
+
+Section 3.1 of Gebauer et al. runs exactly the experiment this repository
+runs: prestress to a threshold, then switch on G&R and see where it settles.
+
+| eps_pre [mm] | their iterations | deviation from homeostasis | after G&R [mm] | ratio |
+|---|---|---|---|---|
+| 0.1 | 136 | 2 % | 0.4 | 4.0 |
+| 0.01 | 393 | 0.4 % | 0.03 | 3.0 |
+| 0.001 | 745 | 0.04 % | 0.003 | 3.0 |
+
+Two things stand out, and both are worth the manuscript's attention.
+
+**Their ratio is constant at 3-4x over three decades** -- "around half an
+order of magnitude", as they put it -- with no floor. The AIM on the cylinder
+and the aorta instead reaches a floor and stops improving (see
+`docs/aorta.md`). Whether that is a difference between the algorithms or
+between the equilibration operators (they integrate the full G&R evolution to
+a limit configuration; the ladders here solve one equilibrated elastic
+problem) is exactly what the heart ladder is there to separate, since it runs
+their material on our solver.
+
+**Their prestressing takes 136 to 745 iterations where the AIM takes 15.**
+That is not a small constant factor, and it is the clearest argument for the
+AIM in the paper.

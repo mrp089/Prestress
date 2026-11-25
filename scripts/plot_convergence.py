@@ -35,6 +35,10 @@ CASES = ("cylinder", "aorta", "heart")
 TITLES = {"cylinder": "idealised cylinder",
           "aorta": "VMR 0012_H_AO_H aorta  (97 mmHg)",
           "heart": "Pfaller19 four-chamber heart"}
+# Gebauer et al. (2023), Sec. 3.1: their own prestress ladder on a prolate
+# spheroid LV, for comparison -- (threshold, iterations, displacement after
+# G&R) in mm.  Their ratio is a constant 3-4x over three decades.
+GEBAUER23_LADDER = [(1e-1, 136, 4e-1), (1e-2, 393, 3e-2), (1e-3, 745, 3e-3)]
 COLOR = {"cylinder": "#1f77b4", "aorta": "#d62728", "heart": "#2ca02c"}
 
 
@@ -74,8 +78,19 @@ def load(case: str, root: Path) -> dict:
     if case == "heart":
         h = json.loads(_find(root, "heart/summary_heart.json",
                              "ladders/heart_summary.json").read_text())
+        # The elastic heart has no equilibration step.  The constrained
+        # mixture of Gebauer et al. (2023) does, and when that ladder has been
+        # run it is plotted like the other two.
+        try:
+            rows = json.loads(_find(root, "heart_equil/summary.json",
+                                    "ladders/heart_equilibrated.json").read_text())
+        except FileNotFoundError:
+            return dict(residual=np.asarray(h["residual"], float),
+                        stops=[], elastic=True)
         return dict(residual=np.asarray(h["residual"], float),
-                    stops=[], elastic=True)
+                    stops=[(r["aim_iterations"], r["aim_residual"],
+                            r["equilibrated_max"]) for r in rows],
+                    elastic=False)
     raise SystemExit(case)
 
 
@@ -149,6 +164,12 @@ def main() -> None:
                 ax.axhline(floor, color=c, lw=0.9, ls="--", alpha=0.7)
                 ax.text(hi, floor * 1.15, f"floor {floor:.2e} mm",
                         ha="right", va="bottom", fontsize=8, color=c)
+            if case == "heart":
+                g = np.array(GEBAUER23_LADDER, float)
+                ax.loglog(g[:, 0], g[:, 2], "--^", color="0.45", ms=6,
+                          lw=1.3, label="Gebauer23 (their LV)")
+                lo = min(lo, g[:, 2].min() * 0.4)
+                ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
             ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
             ax.legend(fontsize=8, loc="upper left")
         ax.set_xlabel(r"AIM residual at stop  [mm]")

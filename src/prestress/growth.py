@@ -157,7 +157,8 @@ def equilibrated_residual(
 
 def equilibrated_forces_residual(
     model, p, X: np.ndarray, x_target: np.ndarray, fibers, workdir,
-    sigma: float | None = None, n_steps: int = 10, max_iter: int = 12,
+    sigma: float | "Sequence[float]" | None = None,
+    n_steps: int = 10, max_iter: int = 12,
     tol: float = 1e-6, verbose: bool = True, **feb_kw,
 ) -> tuple[float, np.ndarray, list[float]]:
     """Equilibrated constrained mixture, solved as a black box on any mesh.
@@ -192,14 +193,22 @@ def equilibrated_forces_residual(
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     sig = fiber_cauchy_stress(p) if sigma is None else sigma
+    # one homeostatic stress per family: the myocardium of Gebauer et al.
+    # (2023) mixes myocytes and collagen, which sit at different deposition
+    # stretches and so carry different stresses
+    sigs = ([float(sig)] * len(fibers) if np.ndim(sig) == 0
+            else [float(v) for v in sig])
+    if len(sigs) != len(fibers):
+        raise ValueError(f"{len(sigs)} homeostatic stresses for "
+                         f"{len(fibers)} fibre families")
 
     x = np.asarray(X, dtype=float).copy()
     history: list[float] = []
     for it in range(1, max_iter + 1):
         F = deformation_gradients(X, x, model.elements, model.elem_type)
         S = stress_from_gp_directions(
-            [(sig, convect_directions(f, F, model.elements, model.elem_type))
-             for f in fibers])
+            [(sg, convect_directions(f, F, model.elements, model.elem_type))
+             for sg, f in zip(sigs, fibers)])
         forces = nodal_forces_from_stress(x, model.elements, model.elem_type, S)
 
         feb = write_elastin_feb(workdir / f"equil_{it:03d}.feb", model, p,

@@ -143,3 +143,51 @@ def heart_model(h: HeartMesh, pressures_mmhg: dict[str, float] | None = None,
         robin=(("vessels", "vessels", k_vessels, k_vessels),
                ("pericardium", "epi", k_epi, 0.0)),
     ), pmm["LV"] * MMHG_TO_KPA
+
+
+def cmm_fiber_families(h: "HeartMesh",
+                       angles_deg=(0.0, 90.0, 45.0, -45.0)
+                       ) -> tuple[list[np.ndarray], list[str]]:
+    """Myocyte and collagen family directions at every node.
+
+    Gebauer et al. (2023, Fig. 4) put four discrete collagen families in the
+    plane of the cardiomyocytes: along the myocyte fibre, along the
+    cross-fibre direction, and at +/-45 degrees between them, with the
+    collagen mass fraction shared equally.  The myocytes themselves are a
+    fifth, one-dimensional constituent along the fibre direction.
+
+    The plane is spanned by ``fiber1`` (myocyte direction ``f``) and the part
+    of ``fiber2`` (sheet direction ``s``) orthogonal to it.  On this mesh
+    ``f`` and ``s`` are orthogonal almost everywhere, but about 1 % of nodes
+    -- in the great vessels, where no myocardial architecture is defined --
+    carry ``s`` parallel to ``f``.  Gram-Schmidt is singular there, so those
+    nodes fall back to an arbitrary perpendicular: the families are then
+    rotated arbitrarily within a well-defined plane, which is harmless
+    because those nodes carry no myocardium.
+
+    Returns ``(directions, labels)`` with the myocyte family first.
+    """
+    def _unit(v, axis=-1):
+        n = np.linalg.norm(v, axis=axis, keepdims=True)
+        return np.divide(v, n, out=np.zeros_like(v), where=n > 1e-12)
+
+    f = _unit(np.asarray(h.fiber1, dtype=float))
+    s = np.asarray(h.fiber2, dtype=float)
+
+    t = s - np.einsum("ij,ij->i", s, f)[:, None] * f
+    bad = np.linalg.norm(t, axis=1) < 1e-6
+    if bad.any():
+        # any axis not parallel to f gives a valid perpendicular
+        alt = np.tile([0.0, 0.0, 1.0], (bad.sum(), 1))
+        swap = np.abs(f[bad, 2]) > 0.9
+        alt[swap] = [1.0, 0.0, 0.0]
+        t[bad] = alt - np.einsum("ij,ij->i", alt, f[bad])[:, None] * f[bad]
+    e2 = _unit(t)
+
+    dirs = [f]
+    labels = ["myocytes"]
+    for a in angles_deg:
+        r = np.radians(a)
+        dirs.append(_unit(np.cos(r) * f + np.sin(r) * e2))
+        labels.append(f"collagen {a:+.0f} deg")
+    return dirs, labels
