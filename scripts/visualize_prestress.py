@@ -60,6 +60,12 @@ def load_case(case: str, npz: Path | None):
     raise SystemExit(f"unknown case {case!r}")
 
 
+def _camera(pl, view: str) -> None:
+    {"iso": pl.view_isometric, "xy": pl.view_xy,
+     "xz": pl.view_xz, "yz": pl.view_yz}[view]()
+    pl.camera.zoom(1.3)
+
+
 def to_cells(elements, values_gp):
     """Average a Gauss-point field over each element."""
     return values_gp.mean(axis=1)
@@ -76,6 +82,11 @@ def main() -> None:
     ap.add_argument("--glyph-scale", type=float, default=1.0)
     ap.add_argument("--clip", action="store_true",
                     help="cut the model in half so interior glyphs are visible")
+    ap.add_argument("--view", default="iso",
+                    choices=["iso", "xy", "xz", "yz"],
+                    help="camera; a heart reads better from the front than "
+                         "isometrically")
+    ap.add_argument("--opacity", type=float, default=0.35)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -115,22 +126,26 @@ def main() -> None:
     pick = rng.choice(len(centres), size=min(args.glyphs, len(centres)),
                       replace=False)
 
-    # a sensible glyph length: a fraction of the median element size
-    h = float(np.median(grid.compute_cell_sizes(length=False, area=False,
-                                                volume=True)["Volume"]) ** (1 / 3))
-    glyph_len = 1.3 * h * args.glyph_scale
+    # Glyph length is set by the *model*, not the element: a heart has 167k
+    # small tets inside a 210 mm organ, so an element-sized glyph is invisible,
+    # while on the cylinder the two measures happen to agree.
+    b = np.asarray(grid.bounds).reshape(3, 2)
+    diag = float(np.linalg.norm(b[:, 1] - b[:, 0]))
+    glyph_len = 0.013 * diag * args.glyph_scale
 
     # --- panel 1: displacement ---------------------------------------------
     pl = pv.Plotter(off_screen=True, window_size=(900, 1100))
-    pl.add_mesh(surf, scalars="|u| [mm]", cmap="viridis", smooth_shading=True,
-                scalar_bar_args=dict(title="|u|  [mm]", vertical=True,
+    # clip the colour range: one outlying node otherwise flattens the whole map
+    clim = (0.0, float(np.percentile(umag, 99)))
+    pl.add_mesh(surf, scalars="|u| [mm]", cmap="viridis", clim=clim,
+                below_color=None, above_color="#fde725", smooth_shading=True,
+                scalar_bar_args=dict(title="|u|  [mm]  (99 %)", vertical=True,
                                      position_x=0.86, position_y=0.25,
                                      height=0.5, width=0.05,
                                      title_font_size=18, label_font_size=15))
     pl.add_mesh(surf.copy(), color="k", style="wireframe", opacity=0.06)
     pl.background_color = "white"
-    pl.view_isometric()
-    pl.camera.zoom(1.25)
+    _camera(pl, args.view)
     png_u = out.with_name(out.name + "_displacement.png")
     pl.screenshot(str(png_u))
     pl.close()
@@ -144,7 +159,8 @@ def main() -> None:
         shown = grid.clip("y", origin=(0, mid, 0), invert=True).extract_surface()
     else:
         shown = surf
-    pl.add_mesh(shown, color="#dddddd", opacity=0.30, smooth_shading=True)
+    pl.add_mesh(shown, color="#dddddd", opacity=args.opacity,
+                smooth_shading=True)
     pick = pick[keep[pick]]
     line = pv.Line((-0.5, 0, 0), (0.5, 0, 0))
     for i, (c, lab) in enumerate(zip(STRETCH_COLORS, STRETCH_LABELS)):
@@ -154,11 +170,11 @@ def main() -> None:
         g = pts.glyph(orient="dir", scale=False, factor=glyph_len, geom=line)
         pl.add_mesh(g, color=c, line_width=3,
                     label=f"{['lambda_1','lambda_2','lambda_3'][i]}  "
-                          f"median {np.median(lam[:, i]):.4f}")
+                          f"median {np.median(lam[:, i]):.4f}",
+                    render_lines_as_tubes=True)
     pl.add_legend(bcolor="white", size=(0.32, 0.14), loc="lower left")
     pl.background_color = "white"
-    pl.view_isometric()
-    pl.camera.zoom(1.25)
+    _camera(pl, args.view)
     png_d = out.with_name(out.name + "_directions.png")
     pl.screenshot(str(png_d))
     pl.close()
